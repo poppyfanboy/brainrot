@@ -2,17 +2,6 @@
 
 #include <assert.h> // assert
 #include <stdlib.h> // abort
-#include <stddef.h> // NULL, size_t
-#include <string.h> // memset
-
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
-#include <X11/extensions/XShm.h>
-
-#include <time.h>
-
-#include <sys/shm.h>
-#include <sys/ipc.h>
 
 #define sizeof(expr) (isize)sizeof(expr)
 
@@ -31,6 +20,20 @@ void *gui_arena_alloc(GuiArena *arena, isize size) {
     arena->begin += padding + size;
     return ptr;
 }
+
+#ifdef __linux__
+
+#include <stddef.h> // NULL, size_t
+#include <string.h> // memset
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/extensions/XShm.h>
+
+#include <time.h>
+
+#include <sys/shm.h>
+#include <sys/ipc.h>
 
 struct GuiBitmap {
     GuiWindow *window;
@@ -415,3 +418,307 @@ void gui_window_destroy(GuiWindow *window) {
     XDestroyWindow(window->display, window->handle);
     XCloseDisplay(window->display);
 }
+
+#endif // __linux__
+
+#ifdef _WIN32
+
+#include <stddef.h> // NULL
+#include <string.h> // memset
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#define GUI_WINDOW_CLASS_NAME L"GUI_WINDOW_CLASS_NAME"
+
+struct GuiBitmap {
+    GuiWindow *window;
+    HBITMAP handle;
+    HDC device_context;
+
+    isize width;
+    isize height;
+    u32 *data;
+};
+
+struct GuiWindow {
+    HWND handle;
+    HDC device_context;
+
+    isize width;
+    isize height;
+    bool resized;
+    GuiBitmap bitmap;
+    bool should_close;
+
+    struct {
+        LARGE_INTEGER frequency;
+        LARGE_INTEGER created_time;
+        LARGE_INTEGER last_update_time;
+        f64 last_frame_delta;
+    } timer;
+};
+
+static LRESULT CALLBACK gui_window_procedure(
+    HWND window_handle,
+    UINT message_type,
+    WPARAM w_param,
+    LPARAM l_param
+) {
+    GuiWindow *window = (GuiWindow *)GetWindowLongPtrW(window_handle, GWLP_USERDATA);
+
+    if (window != NULL) {
+        switch (message_type) {
+        case WM_DESTROY: {
+            window->should_close = true;
+        } break;
+
+        case WM_SIZE: {
+            u32 new_width = LOWORD(l_param);
+            u32 new_height = HIWORD(l_param);
+            if (window->width != new_width || window->height != new_height) {
+                window->width = new_width;
+                window->height = new_height;
+                window->resized = true;
+            }
+        } break;
+        }
+    }
+
+    return DefWindowProcW(window_handle, message_type, w_param, l_param);
+}
+
+GuiWindow *gui_window_create(
+    isize width,
+    isize height,
+    char const *title,
+    GuiArena *arena
+) {
+    assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
+
+    GuiWindow *window = gui_arena_alloc(arena, sizeof(GuiWindow));
+    memset(window, 0, (size_t)sizeof(GuiWindow));
+    window->width = width;
+    window->height = height;
+    window->should_close = false;
+    window->resized = false;
+
+    // Create window class and window.
+    {
+        WNDCLASSW window_class_data = {
+            .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+            .lpfnWndProc = gui_window_procedure,
+            .hInstance = GetModuleHandleW(NULL),
+            .hCursor = LoadCursor(NULL, IDC_ARROW),
+            .lpszClassName = GUI_WINDOW_CLASS_NAME,
+        };
+        ATOM window_class = RegisterClassW(&window_class_data);
+        if (window_class == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            goto fail;
+        }
+
+        int wide_title_size = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
+        if (wide_title_size == 0) {
+            goto fail;
+        }
+        WCHAR *wide_title = gui_arena_alloc(arena, wide_title_size);
+        MultiByteToWideChar(CP_UTF8, 0, title, -1, wide_title, wide_title_size);
+
+        HWND handle = CreateWindowExW(
+            0,
+            GUI_WINDOW_CLASS_NAME,
+            wide_title,
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            (int)width,
+            (int)height,
+            NULL,
+            NULL,
+            GetModuleHandleW(NULL),
+            NULL
+        );
+        if (handle == NULL) {
+            goto fail;
+        }
+        SetWindowLongPtrW(handle, GWLP_USERDATA, (LONG_PTR)window);
+        HDC device_context = GetDC(handle);
+
+        window->handle = handle;
+        window->device_context = device_context;
+    }
+
+    // Create a bitmap.
+    {
+        u32 *bitmap_data = NULL;
+
+        BITMAPINFO bitmap_info = {
+            .bmiHeader = {
+                .biSize = sizeof(BITMAPINFOHEADER),
+                .biWidth = (int)width,
+                .biHeight = (int)-height,
+                .biPlanes = 1,
+                .biBitCount = 32,
+                .biCompression = BI_RGB,
+            },
+        };
+        HBITMAP handle = CreateDIBSection(
+            window->device_context,
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            (void **)&bitmap_data,
+            NULL,
+            0
+        );
+
+        HDC device_context = CreateCompatibleDC(window->device_context);
+        HBITMAP default_bitmap = (HBITMAP)SelectObject(device_context, handle);
+        DeleteObject(default_bitmap);
+
+        window->bitmap.window = window;
+        window->bitmap.handle = handle;
+        window->bitmap.device_context = device_context;
+        window->bitmap.width = width;
+        window->bitmap.height = height;
+        window->bitmap.data = bitmap_data;
+    }
+
+    // Show the window only once everything is initialized.
+    ShowWindow(window->handle, SW_SHOWNORMAL);
+
+    // Start the timer.
+    QueryPerformanceFrequency(&window->timer.frequency);
+    LARGE_INTEGER created_time;
+    QueryPerformanceCounter(&created_time);
+    window->timer.created_time = created_time;
+    window->timer.last_update_time = created_time;
+    window->timer.last_frame_delta = 0.0;
+
+    return window;
+
+fail:
+    if (window->handle != NULL) {
+        DestroyWindow(window->handle);
+    }
+    return NULL;
+}
+
+void gui_window_destroy(GuiWindow *window) {
+    DeleteDC(window->bitmap.device_context);
+    DeleteObject(window->bitmap.data);
+    DeleteObject(window->bitmap.handle);
+
+    DestroyWindow(window->handle);
+}
+
+bool gui_window_resized(GuiWindow const *window) {
+    return window->resized;
+}
+
+void gui_window_size(GuiWindow const *window, isize *width, isize *height) {
+    *width = window->width;
+    *height = window->height;
+}
+
+bool gui_window_should_close(GuiWindow *window) {
+    LARGE_INTEGER current_time;
+    QueryPerformanceCounter(&current_time);
+    LONGLONG elapsed_ticks = current_time.QuadPart - window->timer.last_update_time.QuadPart;
+    LONGLONG elapsed_us = elapsed_ticks * 1000000 / window->timer.frequency.QuadPart;
+    window->timer.last_frame_delta = (f64)elapsed_us / 1e6;
+    window->timer.last_update_time = current_time;
+
+    window->resized = false;
+
+    MSG message;
+    while (!window->should_close && PeekMessageW(&message, window->handle, 0, 0, PM_REMOVE)) {
+        if (message.message == WM_QUIT) {
+            window->should_close = true;
+        }
+
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    return window->should_close;
+}
+
+f64 gui_window_time(GuiWindow const *window) {
+    LARGE_INTEGER current_time;
+    QueryPerformanceCounter(&current_time);
+    LONGLONG elapsed_ticks = current_time.QuadPart - window->timer.created_time.QuadPart;
+    LONGLONG elapsed_us = elapsed_ticks * 1000000 / window->timer.frequency.QuadPart;
+    return (f64)elapsed_us / 1e6;
+}
+
+f64 gui_window_frame_time(GuiWindow const *window) {
+    return window->timer.last_frame_delta;
+}
+
+GuiBitmap *gui_window_bitmap(GuiWindow *window) {
+    return &window->bitmap;
+}
+
+u32 *gui_bitmap_data(GuiBitmap const *bitmap) {
+    return bitmap->data;
+}
+
+bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height) {
+    if (bitmap->width != width || bitmap->height != height) {
+        u32 *bitmap_data;
+        BITMAPINFO bitmap_info = {
+            .bmiHeader = {
+                .biSize = sizeof(BITMAPINFOHEADER),
+                .biWidth = (int)width,
+                .biHeight = (int)-height,
+                .biPlanes = 1,
+                .biBitCount = 32,
+                .biCompression = BI_RGB,
+            },
+        };
+        HBITMAP new_handle = CreateDIBSection(
+            bitmap->window->device_context,
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            (void **)&bitmap_data,
+            NULL,
+            0
+        );
+        HDC new_device_context = CreateCompatibleDC(bitmap->window->device_context);
+
+        HBITMAP default_bitmap = (HBITMAP)SelectObject(new_device_context, new_handle);
+        DeleteObject(default_bitmap);
+        DeleteDC(bitmap->device_context);
+        DeleteObject(bitmap->data);
+
+        bitmap->device_context = new_device_context;
+        bitmap->handle = new_handle;
+        bitmap->data = bitmap_data;
+        bitmap->width = width;
+        bitmap->height = height;
+    }
+
+    return true;
+}
+
+void gui_bitmap_size(GuiBitmap const *bitmap, isize *width, isize *height) {
+    *width = bitmap->width;
+    *height = bitmap->height;
+}
+
+void gui_bitmap_render(GuiBitmap *bitmap) {
+    BitBlt(
+        bitmap->window->device_context,
+        0,
+        0,
+        (int)bitmap->width,
+        (int)bitmap->height,
+        bitmap->device_context,
+        0,
+        0,
+        SRCCOPY
+    );
+}
+
+#endif // _WIN32
