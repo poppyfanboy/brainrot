@@ -5,6 +5,10 @@
 
 #include "gui.h"
 
+#ifndef M_PI
+    #define M_PI 3.14159265358979323846
+#endif
+
 #define sizeof(expr) (isize)sizeof(expr)
 #define countof(array) (sizeof(array) / sizeof((array)[0]))
 
@@ -230,6 +234,10 @@ int main(void) {
         isize width;
         isize height;
         gui_bitmap_size(gui_bitmap, &width, &height);
+        if (width == 0 || height == 0) {
+            continue;
+        }
+
         u32 *bitmap = gui_bitmap_data(gui_bitmap);
 
         f32 dt = (f32)gui_window_frame_time(window);

@@ -423,14 +423,49 @@ void gui_window_destroy(GuiWindow *window) {
 
 #ifdef _WIN32
 
-#include <stddef.h> // NULL
+#include <stddef.h> // size_t, NULL
 #include <string.h> // memset
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
-#define GUI_WINDOW_CLASS_NAME L"GUI_WINDOW_CLASS_NAME"
+// I took these from here:
+// https://github.com/f1nalspace/final_game_tech/blob/master/final_platform_layer.h
+
+#if defined(__GNUC__) || defined(__clang__)
+
+static i32 i32_atomic_load(volatile i32 *source) {
+    return __sync_add_and_fetch(source, 0);
+}
+
+static void i32_atomic_store(volatile i32 *dest, i32 value) {
+    __sync_synchronize();
+    __sync_lock_test_and_set(dest, value);
+}
+
+static i32 i32_atomic_exchange(volatile i32 *target, i32 value) {
+    __sync_synchronize();
+    return __sync_lock_test_and_set(target, value);
+}
+
+#elif defined(_MSC_VER)
+
+static i32 i32_atomic_load(volatile i32 *source) {
+    return InterlockedCompareExchange((volatile LONG *)source, 0, 0);
+}
+
+static void i32_atomic_store(volatile i32 *dest, i32 value) {
+    InterlockedExchange((volatile LONG *)dest, value);
+}
+
+static i32 i32_atomic_exchange(volatile i32 *target, i32 value) {
+    return InterlockedExchange((volatile LONG *)target, value);
+}
+
+#endif
+
+#define WINDOW_CLASS_NAME L"WINDOW_CLASS_NAME"
 
 struct GuiBitmap {
     GuiWindow *window;
@@ -446,11 +481,11 @@ struct GuiWindow {
     HWND handle;
     HDC device_context;
 
-    isize width;
-    isize height;
-    bool resized;
+    volatile i32 width;
+    volatile i32 height;
+    volatile i32 resized;
     GuiBitmap bitmap;
-    bool should_close;
+    volatile i32 should_close;
 
     struct {
         LARGE_INTEGER frequency;
@@ -460,7 +495,7 @@ struct GuiWindow {
     } timer;
 };
 
-static LRESULT CALLBACK gui_window_procedure(
+static LRESULT CALLBACK window_procedure(
     HWND window_handle,
     UINT message_type,
     WPARAM w_param,
@@ -471,22 +506,94 @@ static LRESULT CALLBACK gui_window_procedure(
     if (window != NULL) {
         switch (message_type) {
         case WM_DESTROY: {
-            window->should_close = true;
+            i32_atomic_store(&window->should_close, true);
         } break;
 
         case WM_SIZE: {
-            u32 new_width = LOWORD(l_param);
-            u32 new_height = HIWORD(l_param);
+            i32 new_width = LOWORD(l_param);
+            i32 new_height = HIWORD(l_param);
             if (window->width != new_width || window->height != new_height) {
-                window->width = new_width;
-                window->height = new_height;
-                window->resized = true;
+                i32_atomic_store(&window->width, new_width);
+                i32_atomic_store(&window->height, new_height);
+                i32_atomic_store(&window->resized, true);
             }
         } break;
         }
     }
 
     return DefWindowProcW(window_handle, message_type, w_param, l_param);
+}
+
+#define WINDOW_CREATE_MESSAGE WM_USER
+
+typedef struct {
+    GuiWindow *window;
+    WCHAR *title;
+    isize width;
+    isize height;
+    HANDLE window_created_event;
+} WindowCreateData;
+
+static DWORD event_loop_procedure(LPVOID param) {
+    // Call a function from user32 (PeekMessageW in this case) to set up a message queue.
+    // https://stackoverflow.com/questions/22428066/postthreadmessage-doesnt-work#comment34127566_22433275
+    {
+        MSG message;
+        PeekMessageW(&message, NULL, 0, 0, PM_NOREMOVE);
+
+        HANDLE event_loop_created_event = (HANDLE)param;
+        SetEvent(event_loop_created_event);
+    }
+
+    MSG message;
+    while (GetMessageW(&message, NULL, 0, 0)) {
+        UINT message_type = message.message;
+
+        switch (message_type) {
+        case WINDOW_CREATE_MESSAGE: {
+            WindowCreateData *message_data = (WindowCreateData *)message.lParam;
+
+            RECT window_rect = {0, 0, (int)message_data->width, (int)message_data->height};
+            AdjustWindowRect(&window_rect, WS_OVERLAPPEDWINDOW, FALSE);
+            HWND window_handle = CreateWindowExW(
+                0,
+                WINDOW_CLASS_NAME,
+                message_data->title,
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                window_rect.right - window_rect.left,
+                window_rect.bottom - window_rect.top,
+                NULL,
+                NULL,
+                GetModuleHandleW(NULL),
+                NULL
+            );
+            if (window_handle != NULL) {
+                SetWindowLongPtrW(window_handle, GWLP_USERDATA, (LONG_PTR)message_data->window);
+            }
+            message_data->window->handle = window_handle;
+
+            SetEvent(message_data->window_created_event);
+        } break;
+
+        default: {
+            TranslateMessage(&message);
+
+            // Don't dispatch WM_PAINT messages. For some reason dispatching them causes a visible
+            // rendering slowdown on Linux under Wine.
+            //
+            // (For the record, we can't get rid of the window procedure and just handle all events
+            // right here, because some of the events (e.g. WM_SIZE) are sent directly to the window
+            // procedure.)
+            if (message.message != WM_PAINT) {
+                DispatchMessage(&message);
+            }
+        } break;
+        }
+    }
+
+    return 0;
 }
 
 GuiWindow *gui_window_create(
@@ -499,25 +606,62 @@ GuiWindow *gui_window_create(
 
     GuiWindow *window = gui_arena_alloc(arena, sizeof(GuiWindow));
     memset(window, 0, (size_t)sizeof(GuiWindow));
-    window->width = width;
-    window->height = height;
+    window->width = (i32)width;
+    window->height = (i32)height;
     window->should_close = false;
     window->resized = false;
 
-    // Create window class and window.
+    // Create a separate "event loop" thread responsible for creating windows and handling their
+    // events. If we were to handle messages on the same thread where we render frames, message
+    // processing during resizing and moving the window would interrupt rendering new frames until
+    // resizing/moving is finished.
+    //
+    // Similar to this:
+    // https://github.com/cmuratori/dtc
+    // except that I'm not using Windows message queue to communicate between the threads.
+
+    static struct {
+        HANDLE handle;
+        DWORD id;
+    } event_loop = {0};
+
+    if (event_loop.handle == NULL) {
+        HANDLE event_loop_created_event = CreateEventW(NULL, true, false, NULL);
+
+        event_loop.handle = CreateThread(
+            NULL,
+            0,
+            event_loop_procedure,
+            event_loop_created_event,
+            0,
+            &event_loop.id
+        );
+        if (event_loop.handle == NULL) {
+            goto fail;
+        }
+
+        if (WaitForSingleObject(event_loop_created_event, 5000) != WAIT_OBJECT_0) {
+            goto fail;
+        }
+    }
+
+    // Create a window class, if it does not exist yet.
     {
         WNDCLASSW window_class_data = {
             .style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
-            .lpfnWndProc = gui_window_procedure,
+            .lpfnWndProc = window_procedure,
             .hInstance = GetModuleHandleW(NULL),
             .hCursor = LoadCursor(NULL, IDC_ARROW),
-            .lpszClassName = GUI_WINDOW_CLASS_NAME,
+            .lpszClassName = WINDOW_CLASS_NAME,
         };
         ATOM window_class = RegisterClassW(&window_class_data);
         if (window_class == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
             goto fail;
         }
+    }
 
+    // Create a window by sending WINDOW_CREATE_MESSAGE to the event loop thread.
+    {
         int wide_title_size = MultiByteToWideChar(CP_UTF8, 0, title, -1, NULL, 0);
         if (wide_title_size == 0) {
             goto fail;
@@ -525,28 +669,25 @@ GuiWindow *gui_window_create(
         WCHAR *wide_title = gui_arena_alloc(arena, wide_title_size);
         MultiByteToWideChar(CP_UTF8, 0, title, -1, wide_title, wide_title_size);
 
-        HWND handle = CreateWindowExW(
-            0,
-            GUI_WINDOW_CLASS_NAME,
-            wide_title,
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            (int)width,
-            (int)height,
-            NULL,
-            NULL,
-            GetModuleHandleW(NULL),
-            NULL
-        );
-        if (handle == NULL) {
+        WindowCreateData window_data = {
+            .window = window,
+            .title = wide_title,
+            .width = width,
+            .height = height,
+            .window_created_event = CreateEventW(NULL, true, false, NULL),
+        };
+        if (!PostThreadMessageW(event_loop.id, WINDOW_CREATE_MESSAGE, 0, (LPARAM)&window_data)) {
             goto fail;
         }
-        SetWindowLongPtrW(handle, GWLP_USERDATA, (LONG_PTR)window);
-        HDC device_context = GetDC(handle);
+        if (WaitForSingleObject(window_data.window_created_event, 5000) != WAIT_OBJECT_0) {
+            goto fail;
+        }
+        if (window->handle == NULL) {
+            goto fail;
+        }
 
-        window->handle = handle;
-        window->device_context = device_context;
+        SetWindowLongPtrW(window->handle, GWLP_USERDATA, (LONG_PTR)window);
+        window->device_context = GetDC(window->handle);
     }
 
     // Create a bitmap.
@@ -613,12 +754,12 @@ void gui_window_destroy(GuiWindow *window) {
 }
 
 bool gui_window_resized(GuiWindow const *window) {
-    return window->resized;
+    return i32_atomic_exchange((volatile i32 *)&window->resized, false);
 }
 
 void gui_window_size(GuiWindow const *window, isize *width, isize *height) {
-    *width = window->width;
-    *height = window->height;
+    *width = i32_atomic_load((volatile i32 *)&window->width);
+    *height = i32_atomic_load((volatile i32 *)&window->height);
 }
 
 bool gui_window_should_close(GuiWindow *window) {
@@ -629,19 +770,7 @@ bool gui_window_should_close(GuiWindow *window) {
     window->timer.last_frame_delta = (f64)elapsed_us / 1e6;
     window->timer.last_update_time = current_time;
 
-    window->resized = false;
-
-    MSG message;
-    while (!window->should_close && PeekMessageW(&message, window->handle, 0, 0, PM_REMOVE)) {
-        if (message.message == WM_QUIT) {
-            window->should_close = true;
-        }
-
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
-    }
-
-    return window->should_close;
+    return i32_atomic_load(&window->should_close);
 }
 
 f64 gui_window_time(GuiWindow const *window) {
@@ -691,6 +820,7 @@ bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height) {
         DeleteObject(default_bitmap);
         DeleteDC(bitmap->device_context);
         DeleteObject(bitmap->data);
+        DeleteObject(bitmap->handle);
 
         bitmap->device_context = new_device_context;
         bitmap->handle = new_handle;
