@@ -1,9 +1,15 @@
+// TODO: Extract rendering into functions which are given a region where they are supposed to draw.
+// TODO: Add swept AABB collision.
+
 #include <stdlib.h> // malloc, free
 #include <stddef.h> // size_t, NULL
 #include <time.h>   // time
-#include <math.h>   // fabsf, sinf, cosf
+#include <math.h>   // fabsf, sinf, cosf, M_PI
+#include <stdio.h>  // snprintf
 
 #include "gui.h"
+
+#include "../res/font8x8.c"
 
 #ifndef M_PI
     #define M_PI 3.14159265358979323846
@@ -16,8 +22,8 @@
 // Licensed under Apache License 2.0 (NO WARRANTY, etc. see website)
 
 typedef struct {
-    uint64_t state;
-    uint64_t inc;
+    u64 state;
+    u64 inc;
 } PCG32;
 
 u32 pcg32_random(PCG32 *rng) {
@@ -51,6 +57,14 @@ static inline isize isize_clamp(isize value, isize min, isize max) {
     return value;
 }
 
+static inline isize isize_min(isize left, isize right) {
+    return left < right ? left : right;
+}
+
+static inline isize isize_max(isize left, isize right) {
+    return left > right ? left : right;
+}
+
 static inline f32 f32_max(f32 left, f32 right) {
     return left > right ? left : right;
 }
@@ -60,18 +74,18 @@ static inline f32 f32_min(f32 left, f32 right) {
 }
 
 void fill_rect(
-    u32 *bitmap,
-    isize bitmap_width,
-    isize bitmap_height,
-
-    isize pos_x,
-    isize pos_y,
-
-    isize width,
-    isize height,
-
+    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    isize pos_x, isize pos_y,
+    isize width, isize height,
     u32 color
 ) {
+    if (bitmap_width == 0 || bitmap_height == 0) {
+        return;
+    }
+    if (width == 0 || height == 0) {
+        return;
+    }
+
     isize from_x = isize_clamp(pos_x, 0, bitmap_width - 1);
     isize from_y = isize_clamp(pos_y, 0, bitmap_height - 1);
     isize to_x = isize_clamp(pos_x + width - 1, 0, bitmap_width - 1);
@@ -90,18 +104,18 @@ void fill_rect(
 }
 
 void draw_rect(
-    u32 *bitmap,
-    isize bitmap_width,
-    isize bitmap_height,
-
-    isize pos_x,
-    isize pos_y,
-
-    isize width,
-    isize height,
-
+    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    isize pos_x, isize pos_y,
+    isize width, isize height,
     u32 color
 ) {
+    if (bitmap_width == 0 || bitmap_height == 0) {
+        return;
+    }
+    if (width == 0 || height == 0) {
+        return;
+    }
+
     isize from_x = isize_clamp(pos_x, 0, bitmap_width - 1);
     isize from_y = isize_clamp(pos_y, 0, bitmap_height - 1);
     isize to_x = isize_clamp(pos_x + width - 1, 0, bitmap_width - 1);
@@ -115,6 +129,138 @@ void draw_rect(
     for (isize y = from_y; y <= to_y; y += 1) {
         bitmap[y * bitmap_width + from_x] = color;
         bitmap[y * bitmap_width + to_x] = color;
+    }
+}
+
+u8 utf8_char_size[] = {
+//  0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 0
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 1
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 2
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 3
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 4
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 5
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 6
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 7
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 8
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 9
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
+    0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // D
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // E
+    4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
+};
+
+u32 utf8_chop_char(char const **string_out) {
+    char const *string = *string_out;
+    isize char_size = utf8_char_size[(u8)string[0]];
+    *string_out += char_size;
+
+    switch (char_size) {
+    case 1: {
+        return
+            (u32)(string[0]);
+    } break;
+
+    case 2: {
+        return
+            (u32)(string[0] & 0x1f) << 6 |
+            (u32)(string[1] & 0x3f);
+    } break;
+
+    case 3: {
+        return
+            (u32)(string[0] & 0x0f) << 12 |
+            (u32)(string[1] & 0x3f) << 6 |
+            (u32)(string[2] & 0x3f);
+    } break;
+
+    case 4:
+    default: {
+        return
+            (u32)(string[0] & 0x07) << 18 |
+            (u32)(string[1] & 0x3f) << 12 |
+            (u32)(string[2] & 0x3f) << 6 |
+            (u32)(string[3] & 0x3f);
+    } break;
+    }
+}
+
+void draw_debug_text(
+    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    isize pos_x, isize pos_y,
+    char const *text,
+    u32 color
+) {
+    isize current_pos_x = pos_x;
+    isize current_pos_y = pos_y;
+
+    char const *text_iter = text;
+    while (*text_iter != 0) {
+        u32 next_char = utf8_chop_char(&text_iter);
+
+        if (next_char == '\n') {
+            current_pos_x = pos_x;
+            current_pos_y += font8x8_glyph_height;
+        } else {
+            u32 *glyph_bitmap = NULL;
+            {
+                isize left = 0;
+                isize right = font8x8_glyph_count;
+
+                while (left < right) {
+                    isize middle = (left + right) / 2;
+                    if (font8x8_glyphs[middle].char_code < next_char) {
+                        left = middle + 1;
+                    } else {
+                        right = middle;
+                    }
+                }
+                if (font8x8_glyphs[left].char_code == next_char) {
+                    glyph_bitmap = font8x8_glyphs[left].bitmap;
+                }
+            }
+
+            if (
+                glyph_bitmap != NULL &&
+                current_pos_x + font8x8_glyph_width >= 0 && current_pos_x < bitmap_width &&
+                current_pos_y + font8x8_glyph_height >= 0 && current_pos_y < bitmap_height
+            ) {
+                for (
+                    isize glyph_y = isize_max(0, -current_pos_y);
+                    glyph_y < isize_min(font8x8_glyph_height, bitmap_height - current_pos_y);
+                    glyph_y += 1
+                ) {
+                    for (
+                        isize glyph_x = isize_max(0, -current_pos_x);
+                        glyph_x < isize_min(font8x8_glyph_width, bitmap_width - current_pos_x);
+                        glyph_x += 1
+                    ) {
+                        isize bitmap_index =
+                            (current_pos_y + glyph_y) * bitmap_width +
+                            (current_pos_x + glyph_x);
+
+                        isize glyph_index = glyph_y * font8x8_glyph_width + glyph_x;
+
+                        if ((glyph_bitmap[glyph_index] & 0xff000000) != 0) {
+                            bitmap[bitmap_index] = color;
+                        }
+                    }
+                }
+            }
+
+            current_pos_x += font8x8_glyph_width;
+        }
+    }
+}
+
+void bitmap_clear(
+    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    u32 color
+) {
+    for (isize i = 0; i < bitmap_width * bitmap_height; i += 1) {
+        bitmap[i] = color;
     }
 }
 
@@ -222,6 +368,10 @@ int main(void) {
         };
     }
 
+    f64 dt_samples[128] = {0};
+    isize dt_sample_next_index = 0;
+    f64 dt_samples_sum = 0.0;
+
     while (!gui_window_should_close(window)) {
         GuiBitmap *gui_bitmap = gui_window_bitmap(window);
         if (gui_window_resized(window)) {
@@ -231,20 +381,25 @@ int main(void) {
             gui_bitmap_resize(gui_bitmap, new_width, new_height);
         }
 
+        u32 *bitmap = gui_bitmap_data(gui_bitmap);
         isize width;
         isize height;
         gui_bitmap_size(gui_bitmap, &width, &height);
-        if (width == 0 || height == 0) {
-            continue;
-        }
-
-        u32 *bitmap = gui_bitmap_data(gui_bitmap);
 
         f32 dt = (f32)gui_window_frame_time(window);
+        dt_samples_sum -= dt_samples[dt_sample_next_index];
+        dt_samples_sum += dt;
 
-        u32 background_color = 0x333333;
-        for (isize i = 0; i < width * height; i += 1) {
-            bitmap[i] = background_color;
+        dt_samples[dt_sample_next_index] = dt;
+        dt_sample_next_index = (dt_sample_next_index + 1) % countof(dt_samples);
+
+        bitmap_clear(bitmap, width, height, 0x333333);
+
+        char text_buffer[128];
+        {
+            isize fps = (isize)(1.0 / (dt_samples_sum / (f64)countof(dt_samples)));
+            snprintf(text_buffer, sizeof(text_buffer), "FPS (moving average): %ld", fps);
+            draw_debug_text(bitmap, width, height, 16, 16, text_buffer, 0xffffff);
         }
 
         f32 screen_aspect_ratio = (f32)width / (f32)height;
