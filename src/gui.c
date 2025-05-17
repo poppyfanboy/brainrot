@@ -2,6 +2,7 @@
 
 #include <assert.h> // assert
 #include <stdlib.h> // abort
+#include <string.h> // memset
 
 #define sizeof(expr) (isize)sizeof(expr)
 
@@ -19,6 +20,66 @@ void *gui_arena_alloc(GuiArena *arena, isize size) {
     void *ptr = arena->begin + padding;
     arena->begin += padding + size;
     return ptr;
+}
+
+#define FPS_SAMPLE_COUNT 5
+#define FPS_SAMPLE_PERIOD 0.1
+
+// Calculates average FPS based on the amount of frames rendered within the last
+// (FPS_SAMPLE_COUNT * FPS_SAMPLE_PERIOD) seconds.
+typedef struct {
+    // How many frames we rendered...
+    isize samples[FPS_SAMPLE_COUNT];
+    isize samples_sum;
+
+    // ...in this amount of time (in nanoseconds).
+    i64 durations[FPS_SAMPLE_COUNT];
+    i64 total_duration;
+
+    isize next_sample;
+    isize next_sample_duration;
+    isize next_sample_index;
+} FPSCounter;
+
+static void fps_counter_init(FPSCounter *fps_counter) {
+    memset(fps_counter->samples, 0, sizeof(fps_counter->samples));
+    fps_counter->samples_sum = 0;
+
+    memset(fps_counter->durations, 0, sizeof(fps_counter->durations));
+    // Initialize to 1 to avoid dividing by 0 in fps_counter_average until we get our first sample.
+    fps_counter->durations[0] = 1;
+    fps_counter->total_duration = 1;
+
+    fps_counter->next_sample = 0;
+    fps_counter->next_sample_duration = 0;
+    fps_counter->next_sample_index = 0;
+}
+
+static void fps_counter_add_frame(FPSCounter *fps_counter, i64 frame_time) {
+    fps_counter->next_sample_duration += frame_time;
+    fps_counter->next_sample += 1;
+
+    if (fps_counter->next_sample_duration >= (i64)(FPS_SAMPLE_PERIOD * 1e9)) {
+        fps_counter->samples_sum -= fps_counter->samples[fps_counter->next_sample_index];
+        fps_counter->samples_sum += fps_counter->next_sample;
+        fps_counter->samples[fps_counter->next_sample_index] = fps_counter->next_sample;
+
+        fps_counter->total_duration -= fps_counter->durations[fps_counter->next_sample_index];
+        fps_counter->total_duration += fps_counter->next_sample_duration;
+        fps_counter->durations[fps_counter->next_sample_index] = fps_counter->next_sample_duration;
+
+        fps_counter->next_sample = 0;
+        fps_counter->next_sample_duration = 0;
+
+        fps_counter->next_sample_index = (fps_counter->next_sample_index + 1) % FPS_SAMPLE_COUNT;
+    }
+}
+
+static f32 fps_counter_average(FPSCounter const *fps_counter) {
+    return (f32)(
+        (f64)fps_counter->samples_sum /
+        ((f64)fps_counter->total_duration * 1e-9)
+    );
 }
 
 #ifdef __linux__
@@ -131,8 +192,10 @@ struct GuiWindow {
     struct {
         struct timespec created_time;
         struct timespec last_update_time;
-        f64 last_frame_delta;
+        f64 last_frame_time;
     } timer;
+
+    FPSCounter fps_counter;
 };
 
 GuiWindow *gui_window_create(
@@ -244,7 +307,9 @@ GuiWindow *gui_window_create(
     clock_gettime(CLOCK_MONOTONIC, &created_time);
     window->timer.created_time = created_time;
     window->timer.last_update_time = created_time;
-    window->timer.last_frame_delta = 0.0;
+    window->timer.last_frame_time = 0.0;
+
+    fps_counter_init(&window->fps_counter);
 
     return window;
 
@@ -293,10 +358,14 @@ void gui_window_size(GuiWindow const *window, isize *width, isize *height) {
 bool gui_window_should_close(GuiWindow *window) {
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
-    window->timer.last_frame_delta =
-        (f64)(current_time.tv_sec - window->timer.last_update_time.tv_sec) +
-        (f64)(current_time.tv_nsec - window->timer.last_update_time.tv_nsec) / 1e9;
+    i64 elapsed_seconds = current_time.tv_sec - window->timer.last_update_time.tv_sec;
+    i64 elapsed_nanos = current_time.tv_nsec - window->timer.last_update_time.tv_nsec;
     window->timer.last_update_time = current_time;
+
+    window->timer.last_frame_time = (f64)elapsed_seconds + (f64)elapsed_nanos / 1e9;
+
+    i64 frame_time_nanos = elapsed_seconds * 1000000000 + elapsed_nanos;
+    fps_counter_add_frame(&window->fps_counter, frame_time_nanos);
 
     window->resized = false;
 
@@ -410,7 +479,11 @@ f64 gui_window_time(GuiWindow const *window) {
 }
 
 f64 gui_window_frame_time(GuiWindow const *window) {
-    return window->timer.last_frame_delta;
+    return window->timer.last_frame_time;
+}
+
+f32 gui_window_fps(GuiWindow const *window) {
+    return fps_counter_average(&window->fps_counter);
 }
 
 void gui_window_destroy(GuiWindow *window) {
@@ -491,8 +564,10 @@ struct GuiWindow {
         LARGE_INTEGER frequency;
         LARGE_INTEGER created_time;
         LARGE_INTEGER last_update_time;
-        f64 last_frame_delta;
+        f64 last_frame_time;
     } timer;
+
+    FPSCounter fps_counter;
 };
 
 static LRESULT CALLBACK window_procedure(
@@ -734,7 +809,9 @@ GuiWindow *gui_window_create(
     QueryPerformanceCounter(&created_time);
     window->timer.created_time = created_time;
     window->timer.last_update_time = created_time;
-    window->timer.last_frame_delta = 0.0;
+    window->timer.last_frame_time = 0.0;
+
+    fps_counter_init(&window->fps_counter);
 
     return window;
 
@@ -766,9 +843,15 @@ bool gui_window_should_close(GuiWindow *window) {
     LARGE_INTEGER current_time;
     QueryPerformanceCounter(&current_time);
     LONGLONG elapsed_ticks = current_time.QuadPart - window->timer.last_update_time.QuadPart;
-    LONGLONG elapsed_us = elapsed_ticks * 1000000 / window->timer.frequency.QuadPart;
-    window->timer.last_frame_delta = (f64)elapsed_us / 1e6;
     window->timer.last_update_time = current_time;
+
+    f64 micros_per_tick = 1e6 / (f64)window->timer.frequency.QuadPart;
+    f64 elapsed_micros = (f64)elapsed_ticks * micros_per_tick;
+    window->timer.last_frame_time = elapsed_micros / 1e6;
+
+    f64 nanos_per_tick = 1e9 / (f64)window->timer.frequency.QuadPart;
+    f64 elapsed_nanos = (f64)elapsed_ticks * nanos_per_tick;
+    fps_counter_add_frame(&window->fps_counter, (i64)elapsed_nanos);
 
     return i32_atomic_load(&window->should_close);
 }
@@ -782,7 +865,11 @@ f64 gui_window_time(GuiWindow const *window) {
 }
 
 f64 gui_window_frame_time(GuiWindow const *window) {
-    return window->timer.last_frame_delta;
+    return window->timer.last_frame_time;
+}
+
+f32 gui_window_fps(GuiWindow const *window) {
+    return fps_counter_average(&window->fps_counter);
 }
 
 GuiBitmap *gui_window_bitmap(GuiWindow *window) {

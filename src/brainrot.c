@@ -368,10 +368,6 @@ int main(void) {
         };
     }
 
-    f64 dt_samples[128] = {0};
-    isize dt_sample_next_index = 0;
-    f64 dt_samples_sum = 0.0;
-
     while (!gui_window_should_close(window)) {
         GuiBitmap *gui_bitmap = gui_window_bitmap(window);
         if (gui_window_resized(window)) {
@@ -387,20 +383,12 @@ int main(void) {
         gui_bitmap_size(gui_bitmap, &width, &height);
 
         f32 dt = (f32)gui_window_frame_time(window);
-        dt_samples_sum -= dt_samples[dt_sample_next_index];
-        dt_samples_sum += dt;
-
-        dt_samples[dt_sample_next_index] = dt;
-        dt_sample_next_index = (dt_sample_next_index + 1) % countof(dt_samples);
 
         bitmap_clear(bitmap, width, height, 0x333333);
 
         char text_buffer[128];
-        {
-            isize fps = (isize)(1.0 / (dt_samples_sum / (f64)countof(dt_samples)));
-            snprintf(text_buffer, sizeof(text_buffer), "FPS (moving average): %ld", fps);
-            draw_debug_text(bitmap, width, height, 16, 16, text_buffer, 0xffffff);
-        }
+        snprintf(text_buffer, sizeof(text_buffer), "FPS: %.1f", gui_window_fps(window));
+        draw_debug_text(bitmap, width, height, 16, 16, text_buffer, 0xffffff);
 
         f32 screen_aspect_ratio = (f32)width / (f32)height;
 

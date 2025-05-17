@@ -174,9 +174,11 @@ int main(void) {
         }
 
         if (shmid != -1 && nattch != -1) {
-            void *address = shmat(shmid, 0, 0);
-            shmdt(address);
-            shmctl(shmid, IPC_RMID, 0);
+            if (nattch == 0) {
+                void *address = shmat(shmid, 0, 0);
+                shmdt(address);
+                shmctl(shmid, IPC_RMID, 0);
+            }
         }
     }
 

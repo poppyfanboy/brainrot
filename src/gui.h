@@ -61,6 +61,7 @@ bool gui_window_should_close(GuiWindow *window);
 
 f64 gui_window_time(GuiWindow const *window);
 f64 gui_window_frame_time(GuiWindow const *window);
+f32 gui_window_fps(GuiWindow const *window);
 
 GuiBitmap *gui_window_bitmap(GuiWindow *window);
 u32 *gui_bitmap_data(GuiBitmap const *bitmap);
