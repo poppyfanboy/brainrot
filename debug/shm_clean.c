@@ -1,4 +1,5 @@
 // Clean shared memory segments which have no processes attached to them.
+// $ awk '{if ($7 == 0) print $2}' /proc/sysvipc/shm | xargs -r -L 1 ipcrm -m
 
 #include <stdio.h>      // FILE, fopen, fread, feof
 #include <stdlib.h>     // malloc, realloc
@@ -71,7 +72,7 @@ int main(void) {
         return 1;
     }
 
-    size_t buffer_capacity = 1024;
+    size_t buffer_capacity = 4096;
     size_t buffer_size = 0;
     char *buffer = malloc(buffer_capacity);
     if (buffer == NULL) {

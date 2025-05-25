@@ -1,4 +1,4 @@
-// TODO: Extract rendering into functions which are given a region where they are supposed to draw.
+// TODO: Make it so that randomly generated rectangles never overlap initially on the first frame.
 // TODO: Add swept AABB collision.
 
 #include <stdlib.h> // malloc, free
@@ -73,8 +73,8 @@ static inline f32 f32_min(f32 left, f32 right) {
     return left < right ? left : right;
 }
 
-void fill_rect(
-    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+void fill_rectangle(
+    u32 *bitmap, isize bitmap_width, isize bitmap_height, isize bitmap_stride,
     isize pos_x, isize pos_y,
     isize width, isize height,
     u32 color
@@ -91,7 +91,7 @@ void fill_rect(
     isize to_x = isize_clamp(pos_x + width - 1, 0, bitmap_width - 1);
     isize to_y = isize_clamp(pos_y + height - 1, 0, bitmap_height - 1);
 
-    u32 *line_start = &bitmap[from_y * bitmap_width + from_x];
+    u32 *line_start = &bitmap[from_y * bitmap_stride + from_x];
     for (isize y = from_y; y <= to_y; y += 1) {
         u32 *line_iter = line_start;
         for (isize x = from_x; x <= to_x; x += 1) {
@@ -99,12 +99,12 @@ void fill_rect(
             line_iter += 1;
         }
 
-        line_start += bitmap_width;
+        line_start += bitmap_stride;
     }
 }
 
-void draw_rect(
-    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+void draw_rectangle(
+    u32 *bitmap, isize bitmap_width, isize bitmap_height, isize bitmap_stride,
     isize pos_x, isize pos_y,
     isize width, isize height,
     u32 color
@@ -122,13 +122,13 @@ void draw_rect(
     isize to_y = isize_clamp(pos_y + height - 1, 0, bitmap_height - 1);
 
     for (isize x = from_x; x <= to_x; x += 1) {
-        bitmap[from_y * bitmap_width + x] = color;
-        bitmap[to_y * bitmap_width + x] = color;
+        bitmap[from_y * bitmap_stride + x] = color;
+        bitmap[to_y * bitmap_stride + x] = color;
     }
 
     for (isize y = from_y; y <= to_y; y += 1) {
-        bitmap[y * bitmap_width + from_x] = color;
-        bitmap[y * bitmap_width + to_x] = color;
+        bitmap[y * bitmap_stride + from_x] = color;
+        bitmap[y * bitmap_stride + to_x] = color;
     }
 }
 
@@ -188,7 +188,7 @@ u32 utf8_chop_char(char const **string_out) {
 }
 
 void draw_debug_text(
-    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    u32 *bitmap, isize bitmap_width, isize bitmap_height, isize bitmap_stride,
     isize pos_x, isize pos_y,
     char const *text,
     u32 color
@@ -199,68 +199,70 @@ void draw_debug_text(
     char const *text_iter = text;
     while (*text_iter != 0) {
         u32 next_char = utf8_chop_char(&text_iter);
-
         if (next_char == '\n') {
             current_pos_x = pos_x;
             current_pos_y += font8x8_glyph_height;
-        } else {
-            u32 *glyph_bitmap = NULL;
-            {
-                isize left = 0;
-                isize right = font8x8_glyph_count;
+            continue;
+        }
 
-                while (left < right) {
-                    isize middle = (left + right) / 2;
-                    if (font8x8_glyphs[middle].char_code < next_char) {
-                        left = middle + 1;
-                    } else {
-                        right = middle;
-                    }
-                }
-                if (font8x8_glyphs[left].char_code == next_char) {
-                    glyph_bitmap = font8x8_glyphs[left].bitmap;
+        u32 *glyph_bitmap = NULL;
+        {
+            isize left = 0;
+            isize right = font8x8_glyph_count;
+
+            while (left < right) {
+                isize middle = (left + right) / 2;
+                if (font8x8_glyphs[middle].char_code < next_char) {
+                    left = middle + 1;
+                } else {
+                    right = middle;
                 }
             }
+            if (font8x8_glyphs[left].char_code == next_char) {
+                glyph_bitmap = font8x8_glyphs[left].bitmap;
+            }
+        }
 
-            if (
-                glyph_bitmap != NULL &&
-                current_pos_x + font8x8_glyph_width >= 0 && current_pos_x < bitmap_width &&
-                current_pos_y + font8x8_glyph_height >= 0 && current_pos_y < bitmap_height
+        if (
+            glyph_bitmap != NULL &&
+            current_pos_x + font8x8_glyph_width >= 0 && current_pos_x < bitmap_width &&
+            current_pos_y + font8x8_glyph_height >= 0 && current_pos_y < bitmap_height
+        ) {
+            for (
+                isize glyph_y = isize_max(0, -current_pos_y);
+                glyph_y < isize_min(font8x8_glyph_height, bitmap_height - current_pos_y);
+                glyph_y += 1
             ) {
                 for (
-                    isize glyph_y = isize_max(0, -current_pos_y);
-                    glyph_y < isize_min(font8x8_glyph_height, bitmap_height - current_pos_y);
-                    glyph_y += 1
+                    isize glyph_x = isize_max(0, -current_pos_x);
+                    glyph_x < isize_min(font8x8_glyph_width, bitmap_width - current_pos_x);
+                    glyph_x += 1
                 ) {
-                    for (
-                        isize glyph_x = isize_max(0, -current_pos_x);
-                        glyph_x < isize_min(font8x8_glyph_width, bitmap_width - current_pos_x);
-                        glyph_x += 1
-                    ) {
-                        isize bitmap_index =
-                            (current_pos_y + glyph_y) * bitmap_width +
-                            (current_pos_x + glyph_x);
+                    isize bitmap_index =
+                        (current_pos_y + glyph_y) * bitmap_stride +
+                        (current_pos_x + glyph_x);
 
-                        isize glyph_index = glyph_y * font8x8_glyph_width + glyph_x;
+                    isize glyph_index = glyph_y * font8x8_glyph_width + glyph_x;
 
-                        if ((glyph_bitmap[glyph_index] & 0xff000000) != 0) {
-                            bitmap[bitmap_index] = color;
-                        }
+                    if ((glyph_bitmap[glyph_index] & 0xff000000) != 0) {
+                        bitmap[bitmap_index] = color;
                     }
                 }
             }
-
-            current_pos_x += font8x8_glyph_width;
         }
+
+        current_pos_x += font8x8_glyph_width;
     }
 }
 
 void bitmap_clear(
-    u32 *bitmap, isize bitmap_width, isize bitmap_height,
+    u32 *bitmap, isize bitmap_width, isize bitmap_height, isize bitmap_stride,
     u32 color
 ) {
-    for (isize i = 0; i < bitmap_width * bitmap_height; i += 1) {
-        bitmap[i] = color;
+    for (isize y = 0; y < bitmap_height; y += 1) {
+        for (isize x = 0; x < bitmap_width; x += 1) {
+            bitmap[y * bitmap_stride + x] = color;
+        }
     }
 }
 
@@ -277,12 +279,32 @@ typedef struct {
     bool visible;
 } Rectangle;
 
-typedef struct {
-    f32 top;
-    f32 right;
-    f32 bottom;
-    f32 left;
-} Margin;
+void draw_field(
+    u32 *bitmap, isize bitmap_width, isize bitmap_height, isize bitmap_stride,
+    Rectangle *rectangles, isize rectangle_count
+) {
+    draw_rectangle(
+        bitmap, bitmap_width, bitmap_height, bitmap_stride,
+        0, 0,
+        bitmap_width, bitmap_height,
+        0xffffff
+    );
+
+    f32 aspect_ratio = (f32)bitmap_width / (f32)bitmap_height;
+
+    for (isize i = 0; i < rectangle_count; i += 1) {
+        if (rectangles[i].visible) {
+            fill_rectangle(
+                bitmap, bitmap_width, bitmap_height, bitmap_stride,
+                (isize)(rectangles[i].pos.x / aspect_ratio * (f32)bitmap_width),
+                (isize)(rectangles[i].pos.y * (f32)bitmap_height),
+                (isize)(rectangles[i].size.x / aspect_ratio * (f32)bitmap_width),
+                (isize)(rectangles[i].size.y * (f32)bitmap_height),
+                0xffff00
+            );
+        }
+    }
+}
 
 int main(void) {
     int exit_code = 0;
@@ -305,7 +327,6 @@ int main(void) {
     PCG32 rng;
     pcg32_init(&rng, (u64)time(NULL));
 
-    Margin field_margin = {0.05F, 0.05F, 0.05F, 0.05F};
     f32 const field_aspect_ratio = 4.0F / 3.0F;
 
     isize rectangle_count = 4;
@@ -378,50 +399,59 @@ int main(void) {
         }
 
         u32 *bitmap = gui_bitmap_data(gui_bitmap);
-        isize width;
-        isize height;
-        gui_bitmap_size(gui_bitmap, &width, &height);
+        isize bitmap_width;
+        isize bitmap_height;
+        gui_bitmap_size(gui_bitmap, &bitmap_width, &bitmap_height);
+        isize bitmap_stride = bitmap_width;
 
         f32 dt = (f32)gui_window_frame_time(window);
 
-        bitmap_clear(bitmap, width, height, 0x333333);
+        bitmap_clear(bitmap, bitmap_width, bitmap_height, bitmap_stride, 0x333333);
 
         char text_buffer[128];
         snprintf(text_buffer, sizeof(text_buffer), "FPS: %.1f", gui_window_fps(window));
-        draw_debug_text(bitmap, width, height, 16, 16, text_buffer, 0xffffff);
-
-        f32 screen_aspect_ratio = (f32)width / (f32)height;
-
-        f32x2 field_pos;
-        f32x2 field_size;
-        {
-            f32x2 bounding_box_size = {
-                f32_max(screen_aspect_ratio - (field_margin.left + field_margin.right), 0.0F),
-                f32_max(1.0F - (field_margin.top + field_margin.bottom), 0.0F),
-            };
-
-            if (bounding_box_size.x / bounding_box_size.y > field_aspect_ratio) {
-                field_size.y = bounding_box_size.y;
-                field_pos.y = field_margin.top;
-                field_size.x = field_size.y * field_aspect_ratio;
-                field_pos.x = (bounding_box_size.x - field_size.x) / 2.0F + field_margin.left;
-            } else {
-                field_size.x = bounding_box_size.x;
-                field_pos.x = field_margin.left;
-                field_size.y = field_size.x / field_aspect_ratio;
-                field_pos.y = (bounding_box_size.y - field_size.y) / 2.0F + field_margin.top;
-            }
-        }
-        draw_rect(
-            bitmap,
-            width,
-            height,
-            (isize)(field_pos.x / screen_aspect_ratio * (f32)width),
-            (isize)(field_pos.y * (f32)height),
-            (isize)(field_size.x / screen_aspect_ratio * (f32)width),
-            (isize)(field_size.y * (f32)height),
+        draw_debug_text(
+            bitmap, bitmap_width, bitmap_height, bitmap_stride,
+            16, 16,
+            text_buffer,
             0xffffff
         );
+
+        // This looks ugly, but I don't think it would be appropritate to hide this code inside of
+        // draw_field. It's not related to rendering the game field, it's more about computing the
+        // layout: "given the margin and the outer box's coordinates and dimensions, compute where
+        // the inner box should be placed within the outer one". Such layout computations should've
+        // been extracted and abstracted away as something separate, if we had more of them.
+        {
+            isize const field_margin = 64;
+            f32 screen_interior_aspect_ratio =
+                f32_max((f32)(bitmap_width - 2 * field_margin), 0.0F) /
+                f32_max((f32)(bitmap_height - 2 * field_margin), 0.0F);
+
+            if (screen_interior_aspect_ratio > field_aspect_ratio) {
+                isize field_height = isize_max(bitmap_height - 2 * field_margin, 0);
+                isize field_width = (isize)((f32)field_height * field_aspect_ratio);
+
+                draw_field(
+                    &bitmap[field_margin * bitmap_width + (bitmap_width - field_width) / 2],
+                    field_width, field_height,
+                    bitmap_stride,
+                    rectangles, countof(rectangles)
+                );
+            } else {
+                isize field_width = isize_max(bitmap_width - 2 * field_margin, 0);
+                isize field_height = (isize)((f32)field_width / field_aspect_ratio);
+
+                draw_field(
+                    &bitmap[(bitmap_height - field_height) / 2 * bitmap_width + field_margin],
+                    field_width, field_height,
+                    bitmap_stride,
+                    rectangles, countof(rectangles)
+                );
+            }
+        }
+
+        gui_bitmap_render(gui_bitmap);
 
         for (isize i = 0; i < countof(rectangles); i += 1) {
             rectangles[i].pos.x += rectangles[i].speed * rectangles[i].direction.x * dt;
@@ -486,39 +516,13 @@ int main(void) {
 
             }
         }
-
-        for (isize i = 0; i < countof(rectangles); i += 1) {
-            if (rectangles[i].visible) {
-                f32x2 rect_size = {
-                    rectangles[i].size.x / field_aspect_ratio * field_size.x,
-                    rectangles[i].size.y * field_size.y,
-                };
-
-                f32x2 rect_pos = {
-                    field_pos.x + (rectangles[i].pos.x / field_aspect_ratio) * field_size.x,
-                    field_pos.y + rectangles[i].pos.y * field_size.y,
-                };
-
-                fill_rect(
-                    bitmap,
-                    width,
-                    height,
-                    (isize)(rect_pos.x / screen_aspect_ratio * (f32)width),
-                    (isize)(rect_pos.y * (f32)height),
-                    (isize)(rect_size.x / screen_aspect_ratio * (f32)width),
-                    (isize)(rect_size.y * (f32)height),
-                    0xffff00
-                );
-            }
-        }
-
-        gui_bitmap_render(gui_bitmap);
     }
 
     goto clean_up;
 
 fail:
     exit_code = 1;
+
 clean_up:
     if (window != NULL) {
         gui_window_destroy(window);
