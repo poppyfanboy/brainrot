@@ -6,9 +6,14 @@
 
 #define sizeof(expr) (isize)sizeof(expr)
 
+typedef struct {
+    u8 *begin;
+    u8 *end;
+} Arena;
+
 #define ARENA_ALIGNMENT 16
 
-void *gui_arena_alloc(GuiArena *arena, isize size) {
+void *arena_alloc(Arena *arena, isize size) {
     assert(size > 0);
 
     isize padding = (~(uptr)arena->begin + 1) & (ARENA_ALIGNMENT - 1);
@@ -206,7 +211,7 @@ GuiWindow *gui_window_create(
 ) {
     assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
 
-    GuiWindow *window = gui_arena_alloc(arena, sizeof(GuiWindow));
+    GuiWindow *window = arena_alloc(arena, sizeof(GuiWindow));
     memset(window, 0, (size_t)sizeof(GuiWindow));
     window->width = width;
     window->height = height;
@@ -672,14 +677,13 @@ static DWORD event_loop_procedure(LPVOID param) {
 }
 
 GuiWindow *gui_window_create(
-    isize width,
-    isize height,
+    isize width, isize height,
     char const *title,
-    GuiArena *arena
+    void *arena
 ) {
     assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
 
-    GuiWindow *window = gui_arena_alloc(arena, sizeof(GuiWindow));
+    GuiWindow *window = arena_alloc(arena, sizeof(GuiWindow));
     memset(window, 0, (size_t)sizeof(GuiWindow));
     window->width = (i32)width;
     window->height = (i32)height;
@@ -741,7 +745,7 @@ GuiWindow *gui_window_create(
         if (wide_title_size == 0) {
             goto fail;
         }
-        WCHAR *wide_title = gui_arena_alloc(arena, wide_title_size);
+        WCHAR *wide_title = arena_alloc(arena, wide_title_size);
         MultiByteToWideChar(CP_UTF8, 0, title, -1, wide_title, wide_title_size);
 
         WindowCreateData window_data = {

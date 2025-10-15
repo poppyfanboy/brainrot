@@ -32,24 +32,14 @@
     typedef double f64;
 #endif
 
-typedef struct {
-    u8 *begin;
-    u8 *end;
-} GuiArena;
-
-// Always returns a non-null value.
-// Aborts in case we run out of memory.
-// Allocating 0 bytes is not allowed.
-void *gui_arena_alloc(GuiArena *arena, isize size);
-
 typedef struct GuiWindow GuiWindow;
 typedef struct GuiBitmap GuiBitmap;
 
+// Arena is a pair of pointers: struct { u8 *begin; u8 *end; }
 GuiWindow *gui_window_create(
-    isize width,
-    isize height,
+    isize width, isize height,
     char const *title,
-    GuiArena *arena
+    void *arena
 );
 void gui_window_destroy(GuiWindow *window);
 
