@@ -4,7 +4,29 @@
 #include <stdlib.h> // abort
 #include <string.h> // memset
 
-#define sizeof(expr) (isize)sizeof(expr)
+// Redefinition of typedefs is a C11 feature.
+// This is the official™ guard, which is used across different headers to protect u8 and friends.
+// (Or just add a #define before including this header, if you already have short names defined.)
+#ifndef SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
+    #define SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
+    #include <stdint.h>
+    #include <stddef.h>
+
+    typedef uint8_t   u8; typedef int8_t   i8;
+    typedef uint16_t u16; typedef int16_t i16;
+    typedef uint32_t u32; typedef int32_t i32;
+    typedef uint64_t u64; typedef int64_t i64;
+
+    typedef size_t   usize; typedef ptrdiff_t isize;
+    typedef uintptr_t uptr;
+
+    typedef float f32; typedef double f64;
+#endif
+
+#define GUI_MAX_WINDOW_WIDTH 32767
+#define GUI_MAX_WINDOW_HEIGHT 32767
+
+#define countof(array) ((isize)sizeof(array) / (isize)sizeof((array)[0]))
 
 typedef struct {
     u8 *begin;
@@ -80,11 +102,8 @@ static void fps_counter_add_frame(FPSCounter *fps_counter, i64 frame_time) {
     }
 }
 
-static f32 fps_counter_average(FPSCounter const *fps_counter) {
-    return (f32)(
-        (f64)fps_counter->samples_sum /
-        ((f64)fps_counter->total_duration * 1e-9)
-    );
+static f64 fps_counter_average(FPSCounter const *fps_counter) {
+    return (f64)fps_counter->samples_sum / ((f64)fps_counter->total_duration * 1e-9);
 }
 
 #ifdef __linux__
@@ -203,12 +222,7 @@ struct GuiWindow {
     FPSCounter fps_counter;
 };
 
-GuiWindow *gui_window_create(
-    isize width,
-    isize height,
-    char const *title,
-    GuiArena *arena
-) {
+GuiWindow *gui_window_create(int width, int height, char const *title, GuiArena *arena) {
     assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
 
     GuiWindow *window = arena_alloc(arena, sizeof(GuiWindow));
@@ -355,7 +369,7 @@ bool gui_window_resized(GuiWindow const *window) {
     return window->resized;
 }
 
-void gui_window_size(GuiWindow const *window, isize *width, isize *height) {
+void gui_window_size(GuiWindow const *window, int *width, int *height) {
     *width = window->width;
     *height = window->height;
 }
@@ -396,18 +410,18 @@ GuiBitmap *gui_window_bitmap(GuiWindow *window) {
     return &window->bitmap;
 }
 
-u32 *gui_bitmap_data(GuiBitmap const *bitmap) {
+uint32_t *gui_bitmap_data(GuiBitmap const *bitmap) {
     assert(bitmap->available);
 
     return (u32 *)bitmap->shared_segment.shmaddr;
 }
 
-void gui_bitmap_size(GuiBitmap const *bitmap, isize *width, isize *height) {
+void gui_bitmap_size(GuiBitmap const *bitmap, int *width, int *height) {
     *width = bitmap->width;
     *height = bitmap->height;
 }
 
-bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height) {
+bool gui_bitmap_resize(GuiBitmap *bitmap, int width, int height) {
     assert(bitmap->available);
 
     isize buffer_old_size = bitmap->width * bitmap->height * 4;
@@ -474,7 +488,7 @@ void gui_bitmap_render(GuiBitmap *bitmap) {
     XFlush(bitmap->window->display);
 }
 
-f64 gui_window_time(GuiWindow const *window) {
+double gui_window_time(GuiWindow const *window) {
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
 
@@ -483,11 +497,11 @@ f64 gui_window_time(GuiWindow const *window) {
         (f64)(current_time.tv_nsec - window->timer.created_time.tv_nsec) / 1e9;
 }
 
-f64 gui_window_frame_time(GuiWindow const *window) {
+double gui_window_frame_time(GuiWindow const *window) {
     return window->timer.last_frame_time;
 }
 
-f32 gui_window_fps(GuiWindow const *window) {
+double gui_window_fps(GuiWindow const *window) {
     return fps_counter_average(&window->fps_counter);
 }
 
@@ -558,12 +572,21 @@ struct GuiBitmap {
 struct GuiWindow {
     HWND handle;
     HDC device_context;
+    GuiBitmap bitmap;
+    volatile i32 should_close;
 
     volatile i32 width;
     volatile i32 height;
     volatile i32 resized;
-    GuiBitmap bitmap;
-    volatile i32 should_close;
+
+    volatile i32 mouse_x;
+    volatile i32 mouse_y;
+
+    struct {
+        i32 was_down;
+        i32 is_down;
+        volatile i32 currently_down;
+    } mouse_buttons[2];
 
     struct {
         LARGE_INTEGER frequency;
@@ -597,6 +620,30 @@ static LRESULT CALLBACK window_procedure(
                 i32_atomic_store(&window->height, new_height);
                 i32_atomic_store(&window->resized, true);
             }
+        } break;
+
+        case WM_MOUSEMOVE: {
+            i32 mouse_x = LOWORD(l_param);
+            i32 mouse_y = HIWORD(l_param);
+
+            i32_atomic_store(&window->mouse_x, mouse_x);
+            i32_atomic_store(&window->mouse_y, mouse_y);
+        } break;
+
+        case WM_LBUTTONDOWN: {
+            i32_atomic_store(&window->mouse_buttons[GUI_MOUSE_BUTTON_LEFT].currently_down, 1);
+        } break;
+
+        case WM_LBUTTONUP: {
+            i32_atomic_store(&window->mouse_buttons[GUI_MOUSE_BUTTON_LEFT].currently_down, 0);
+        } break;
+
+        case WM_RBUTTONDOWN: {
+            i32_atomic_store(&window->mouse_buttons[GUI_MOUSE_BUTTON_RIGHT].currently_down, 1);
+        } break;
+
+        case WM_RBUTTONUP: {
+            i32_atomic_store(&window->mouse_buttons[GUI_MOUSE_BUTTON_RIGHT].currently_down, 0);
         } break;
         }
     }
@@ -676,11 +723,7 @@ static DWORD event_loop_procedure(LPVOID param) {
     return 0;
 }
 
-GuiWindow *gui_window_create(
-    isize width, isize height,
-    char const *title,
-    void *arena
-) {
+GuiWindow *gui_window_create(int width, int height, char const *title, void *arena) {
     assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
 
     GuiWindow *window = arena_alloc(arena, sizeof(GuiWindow));
@@ -838,9 +881,36 @@ bool gui_window_resized(GuiWindow const *window) {
     return i32_atomic_exchange((volatile i32 *)&window->resized, false);
 }
 
-void gui_window_size(GuiWindow const *window, isize *width, isize *height) {
+void gui_window_size(GuiWindow const *window, int *width, int *height) {
     *width = i32_atomic_load((volatile i32 *)&window->width);
     *height = i32_atomic_load((volatile i32 *)&window->height);
+}
+
+void gui_mouse_position(GuiWindow const *window, int *mouse_x, int *mouse_y) {
+    *mouse_x = i32_atomic_load((volatile i32 *)&window->mouse_x);
+    *mouse_y = i32_atomic_load((volatile i32 *)&window->mouse_y);
+}
+
+bool gui_mouse_button_down(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return window->mouse_buttons[mouse_button].is_down == 1;
+}
+
+bool gui_mouse_button_was_pressed(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return
+        window->mouse_buttons[mouse_button].was_down == 0 &&
+        window->mouse_buttons[mouse_button].is_down == 1;
+}
+
+bool gui_mouse_button_was_released(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return
+        window->mouse_buttons[mouse_button].was_down == 1 &&
+        window->mouse_buttons[mouse_button].is_down == 0;
 }
 
 bool gui_window_should_close(GuiWindow *window) {
@@ -857,10 +927,17 @@ bool gui_window_should_close(GuiWindow *window) {
     f64 elapsed_nanos = (f64)elapsed_ticks * nanos_per_tick;
     fps_counter_add_frame(&window->fps_counter, (i64)elapsed_nanos);
 
+    for (isize i = 0; i < countof(window->mouse_buttons); i += 1) {
+        window->mouse_buttons[i].was_down = window->mouse_buttons[i].is_down;
+        window->mouse_buttons[i].is_down = i32_atomic_load(
+            &window->mouse_buttons[i].currently_down
+        );
+    }
+
     return i32_atomic_load(&window->should_close);
 }
 
-f64 gui_window_time(GuiWindow const *window) {
+double gui_window_time(GuiWindow const *window) {
     LARGE_INTEGER current_time;
     QueryPerformanceCounter(&current_time);
     LONGLONG elapsed_ticks = current_time.QuadPart - window->timer.created_time.QuadPart;
@@ -868,11 +945,11 @@ f64 gui_window_time(GuiWindow const *window) {
     return (f64)elapsed_us / 1e6;
 }
 
-f64 gui_window_frame_time(GuiWindow const *window) {
+double gui_window_frame_time(GuiWindow const *window) {
     return window->timer.last_frame_time;
 }
 
-f32 gui_window_fps(GuiWindow const *window) {
+double gui_window_fps(GuiWindow const *window) {
     return fps_counter_average(&window->fps_counter);
 }
 
@@ -880,18 +957,18 @@ GuiBitmap *gui_window_bitmap(GuiWindow *window) {
     return &window->bitmap;
 }
 
-u32 *gui_bitmap_data(GuiBitmap const *bitmap) {
+uint32_t *gui_bitmap_data(GuiBitmap const *bitmap) {
     return bitmap->data;
 }
 
-bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height) {
+bool gui_bitmap_resize(GuiBitmap *bitmap, int width, int height) {
     if (bitmap->width != width || bitmap->height != height) {
         u32 *bitmap_data;
         BITMAPINFO bitmap_info = {
             .bmiHeader = {
                 .biSize = sizeof(BITMAPINFOHEADER),
-                .biWidth = (int)width,
-                .biHeight = (int)-height,
+                .biWidth = width,
+                .biHeight = -height,
                 .biPlanes = 1,
                 .biBitCount = 32,
                 .biCompression = BI_RGB,
@@ -923,7 +1000,7 @@ bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height) {
     return true;
 }
 
-void gui_bitmap_size(GuiBitmap const *bitmap, isize *width, isize *height) {
+void gui_bitmap_size(GuiBitmap const *bitmap, int *width, int *height) {
     *width = bitmap->width;
     *height = bitmap->height;
 }

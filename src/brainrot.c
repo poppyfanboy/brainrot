@@ -1,21 +1,44 @@
 // TODO: Make it so that randomly generated rectangles never overlap initially on the first frame.
-// TODO: Add swept AABB collision.
 
 #include <assert.h> // assert
 #include <stdlib.h> // malloc
 #include <stddef.h> // NULL
 #include <time.h>   // time
-#include <math.h>   // fabsf, sinf, cosf, M_PI
+#include <math.h>   // fabsf, sinf, cosf, M_PI, floorf
 #include <stdio.h>  // snprintf
 
 #include "gui.h"
+
+// Redefinition of typedefs is a C11 feature.
+// This is the official™ guard, which is used across different headers to protect u8 and friends.
+// (Or just add a #define before including this header, if you already have short names defined.)
+#ifndef SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
+    #define SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
+    #include <stdint.h>
+    #include <stddef.h>
+
+    typedef uint8_t   u8; typedef int8_t   i8;
+    typedef uint16_t u16; typedef int16_t i16;
+    typedef uint32_t u32; typedef int32_t i32;
+    typedef uint64_t u64; typedef int64_t i64;
+
+    typedef size_t   usize; typedef ptrdiff_t isize;
+    typedef uintptr_t uptr;
+
+    typedef float f32; typedef double f64;
+#endif
 
 #include "../res/font8x8.c"
 u32 utf8_chop_char(char const **string_iter);
 u32 *font8x8_glyph_get(u32 unicode_char);
 
+#define BACKGROUND_COLOR 0x192739
+#define ACTIVE_COLOR 0xffec62
+#define SECONDARY_COLOR 0x908f88
+#define DISABLED_COLOR 0x45454c
+
 #define FIELD_ASPECT_RATIO (4.0F / 3.0F)
-#define FIELD_MARGIN 64
+#define FIELD_MARGIN 48
 
 #ifndef M_PI
     #define M_PI 3.14159265358979323846
@@ -49,16 +72,24 @@ void pcg32_init(PCG32 *rng, u64 init_state) {
     pcg32_random(rng);
 }
 
-f64 f64_random(PCG32 *rng) {
+inline f64 f64_random(PCG32 *rng) {
     return (f64)pcg32_random(rng) * 0x1p-32;
 }
 
-static inline f32 f32_max(f32 left, f32 right) {
+inline f32 f32_max(f32 left, f32 right) {
     return left > right ? left : right;
 }
 
-static inline f32 f32_min(f32 left, f32 right) {
+inline f32 f32_min(f32 left, f32 right) {
     return left < right ? left : right;
+}
+
+inline f32 f32_abs(f32 value) {
+    if (value >= 0.0F) {
+        return value;
+    } else {
+        return -value;
+    }
 }
 
 typedef struct {
@@ -66,15 +97,19 @@ typedef struct {
     f32 y;
 } f32x2;
 
-static inline f32x2 f32x2_add(f32x2 left, f32x2 right) {
+inline f32x2 f32x2_add(f32x2 left, f32x2 right) {
     return (f32x2){left.x + right.x, left.y + right.y};
 }
 
-static inline f32x2 f32x2_scale(f32x2 vector, f32 scale) {
+inline f32x2 f32x2_sub(f32x2 left, f32x2 right) {
+    return (f32x2){left.x - right.x, left.y - right.y};
+}
+
+inline f32x2 f32x2_scale(f32x2 vector, f32 scale) {
     return (f32x2){vector.x * scale, vector.y * scale};
 }
 
-static inline f32x2 f32x2_clamp(f32x2 value, f32x2 min, f32x2 max) {
+inline f32x2 f32x2_clamp(f32x2 value, f32x2 min, f32x2 max) {
     if (value.x < min.x) {
         value.x = min.x;
     }
@@ -92,41 +127,119 @@ static inline f32x2 f32x2_clamp(f32x2 value, f32x2 min, f32x2 max) {
     return value;
 }
 
+inline f32x2 f32x2_floor(f32x2 vector) {
+    vector.x = floorf(vector.x);
+    vector.y = floorf(vector.y);
+    return vector;
+}
+
 typedef struct {
     f32x2 min;
     f32x2 max;
-} AABB;
+} f32box2;
 
-AABB aabb_clamp(AABB clamped, AABB outer) {
-    clamped.min = f32x2_clamp(clamped.min, outer.min, outer.max);
-    clamped.max = f32x2_clamp(clamped.max, outer.min, outer.max);
-    return clamped;
+inline f32box2 f32box2_clamp(f32box2 target, f32box2 clamper) {
+    target.min = f32x2_clamp(target.min, clamper.min, clamper.max);
+    target.max = f32x2_clamp(target.max, clamper.min, clamper.max);
+    return target;
 }
 
-bool aabb_vs_aabb(AABB first, AABB second) {
+inline bool f32box2_vs_f32box2(f32box2 this, f32box2 other) {
     return
-        first.min.x < second.max.x && first.max.x > second.min.x &&
-        first.min.y < second.max.y && first.max.y > second.min.y;
+        this.min.x < other.max.x && this.max.x > other.min.x &&
+        this.min.y < other.max.y && this.max.y > other.min.y;
+}
+
+inline bool f32box2_contains(f32box2 box, f32x2 point) {
+    return
+        box.min.x <= point.x && point.x < box.max.x &&
+        box.min.y <= point.y && point.y < box.max.y;
+}
+
+// "normal" is the collision normal at the "near_time" time.
+bool ray_vs_f32box2(
+    f32x2 origin, f32x2 direction,
+    f32box2 box,
+    f32 *near_time, f32 *far_time, f32x2 *normal
+) {
+    // near.x and far.x - collision time with the vertical lines of the box.
+    // near.y and far.y - collision time with the horizontal lines of the box.
+    f32x2 near = {
+        (box.min.x - origin.x) / direction.x,
+        (box.min.y - origin.y) / direction.y,
+    };
+    f32x2 far = {
+        (box.max.x - origin.x) / direction.x,
+        (box.max.y - origin.y) / direction.y,
+    };
+
+    if (box.min.x == origin.x && direction.x == 0 || box.min.y == origin.y && direction.y == 0) {
+        return false;
+    }
+    if (box.max.y == origin.x && direction.x == 0 || box.max.y == origin.y && direction.y == 0) {
+        return false;
+    }
+
+    // Account for rays coming from directions other than "from top-left to bottom-right":
+    if (near.x > far.x) {
+        f32 swap = near.x;
+        near.x = far.x;
+        far.x = swap;
+    }
+    if (near.y > far.y) {
+        f32 swap = near.y;
+        near.y = far.y;
+        far.y = swap;
+    }
+
+    // We intersected with both horizontal (vertical) lines of the box before intersecting with any
+    // of the vertical (horizontal) ones.
+    if (far.y < near.x || far.x < near.y) {
+        return false;
+    }
+
+    *near_time = f32_max(near.x, near.y);
+    *far_time = f32_min(far.x, far.y);
+
+    if (near.x > near.y) {
+        // Ray collided with the vertical side first.
+        // Get collision normal based on if the ray comes from left to right or from right to left.
+        if (direction.x > 0) {
+            *normal = (f32x2){-1.0F, 0.0F};
+        } else {
+            *normal = (f32x2){1.0F, 0.0F};
+        }
+    } else {
+        // Ray collided with the horizontal side first.
+        // Get collision normal based on if the ray comes from top to bottom or from bottom to top.
+        if (direction.y > 0) {
+            *normal = (f32x2){0.0F, -1.0F};
+        } else {
+            *normal = (f32x2){0.0F, 1.0F};
+        }
+    }
+
+    return true;
 }
 
 typedef struct {
     u32 *pixels;
-    isize width, height;
-    isize stride;
+    int width, height;
+    int stride;
 } Bitmap;
 
-AABB bitmap_aabb(Bitmap const *bitmap) {
-    AABB aabb = {
+inline f32box2 bitmap_box(Bitmap const *bitmap) {
+    f32box2 box = {
         .min = {0, 0},
-        .max = {bitmap->width, bitmap->height},
+        .max = {bitmap->width - 1.0F, bitmap->height - 1.0F},
     };
-    return aabb;
+    return box;
 }
 
-Bitmap sub_bitmap(Bitmap const *bitmap, AABB aabb) {
-    aabb = aabb_clamp(aabb, bitmap_aabb(bitmap));
-    isize from_x = aabb.min.x, from_y = aabb.min.y;
-    isize to_x = aabb.max.x, to_y = aabb.max.y;
+inline Bitmap sub_bitmap(Bitmap const *bitmap, f32box2 box) {
+    box = f32box2_clamp(box, bitmap_box(bitmap));
+    isize from_x = box.min.x, from_y = box.min.y;
+    isize to_x = box.max.x, to_y = box.max.y;
 
     Bitmap sub_bitmap = {
         .pixels = &bitmap->pixels[from_y * bitmap->stride + from_x],
@@ -146,31 +259,111 @@ void bitmap_clear(Bitmap *bitmap, u32 color) {
     }
 }
 
-void fill_rectangle(Bitmap *bitmap, AABB rectangle, u32 color) {
-    rectangle = aabb_clamp(rectangle, bitmap_aabb(bitmap));
+void fill_rectangle(Bitmap *bitmap, f32box2 rectangle, u32 color) {
+    rectangle = f32box2_clamp(rectangle, bitmap_box(bitmap));
 
-    for (isize y = rectangle.min.y; y < rectangle.max.y; y += 1) {
+    for (isize y = rectangle.min.y; y <= rectangle.max.y; y += 1) {
         u32 *line = &bitmap->pixels[y * bitmap->stride];
-        for (isize x = rectangle.min.x; x < rectangle.max.x; x += 1) {
+        for (isize x = rectangle.min.x; x <= rectangle.max.x; x += 1) {
             line[x] = color;
         }
     }
 }
 
-void draw_rectangle(Bitmap *bitmap, AABB rectangle, u32 color) {
-    rectangle = aabb_clamp(rectangle, bitmap_aabb(bitmap));
+void draw_rectangle(Bitmap *bitmap, f32box2 rectangle, u32 color) {
+    f32box2 bounds = bitmap_box(bitmap);
+    f32box2 clamped_rectangle = f32box2_clamp(rectangle, bounds);
 
-    for (isize x = rectangle.min.x; x < rectangle.max.x; x += 1) {
-        bitmap->pixels[(isize)rectangle.min.y * bitmap->stride + x] = color;
-        bitmap->pixels[(isize)rectangle.max.y * bitmap->stride + x] = color;
+    // Check if rectangle is completely clamped out
+    if (clamped_rectangle.max.y - clamped_rectangle.min.y < 1) {
+        return;
     }
-    for (isize y = rectangle.min.y; y < rectangle.max.y; y += 1) {
-        bitmap->pixels[y * bitmap->stride + (isize)rectangle.min.x] = color;
-        bitmap->pixels[y * bitmap->stride + (isize)rectangle.max.x] = color;
+    if (clamped_rectangle.max.x - clamped_rectangle.min.x < 1) {
+        return;
+    }
+
+    // Top horizontal line
+    if (bounds.min.y <= rectangle.min.y) {
+        for (isize x = clamped_rectangle.min.x; x <= (isize)clamped_rectangle.max.x; x += 1) {
+            bitmap->pixels[(isize)rectangle.min.y * bitmap->stride + x] = color;
+        }
+    }
+
+    // Bottom horizontal line
+    if (rectangle.max.y <= bounds.max.y) {
+        for (isize x = clamped_rectangle.min.x; x <= (isize)clamped_rectangle.max.x; x += 1) {
+            bitmap->pixels[(isize)rectangle.max.y * bitmap->stride + x] = color;
+        }
+    }
+
+    // Left vertical line
+    if (bounds.min.x <= rectangle.min.x) {
+        for (isize y = clamped_rectangle.min.y; y <= (isize)clamped_rectangle.max.y; y += 1) {
+            bitmap->pixels[y * bitmap->stride + (isize)rectangle.min.x] = color;
+        }
+    }
+
+    // Right vertical line
+    if (rectangle.max.x <= bounds.max.x) {
+        for (isize y = clamped_rectangle.min.y; y <= (isize)clamped_rectangle.max.y; y += 1) {
+            bitmap->pixels[y * bitmap->stride + (isize)rectangle.max.x] = color;
+        }
     }
 }
 
-void draw_text(Bitmap *bitmap, f32x2 text_pos, char const *text, u32 color) {
+void draw_line(Bitmap *bitmap, f32x2 from, f32x2 to, u32 color) {
+    from = f32x2_floor(from);
+    to = f32x2_floor(to);
+
+    f32box2 bounds = bitmap_box(bitmap);
+
+    // Line equation: f(x, y) = Ax + By + C
+    // (A, B) is a perpendicular vector. C is then derived from f(x, y) = 0.
+    f32 A = to.y - from.y;
+    f32 B = from.x - to.x;
+    f32 C = -A * from.x - B * from.y;
+
+    // Single pixel special case:
+    if (A == 0.0F && B == 0.0F) {
+        f32 x = from.x, y = from.y;
+        if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
+            bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+        }
+        return;
+    }
+
+    if (from.x > to.x) {
+        f32 swap = from.x;
+        from.x = to.x;
+        to.x = swap;
+    }
+
+    if (from.y > to.y) {
+        f32 swap = from.y;
+        from.y = to.y;
+        to.y = swap;
+    }
+
+    if (to.x - from.x > to.y - from.y) {
+        for (isize x = from.x; x <= to.x; x += 1) {
+            f32 y = (-A * x - C) / B;
+
+            if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
+                bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+            }
+        }
+    } else {
+        for (isize y = from.y; y <= to.y; y += 1) {
+            f32 x = (-B * y - C) / A;
+
+            if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
+                bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+            }
+        }
+    }
+}
+
+void draw_text(Bitmap *bitmap, f32x2 text_pos, char const *text) {
     f32x2 current_pos = text_pos;
 
     char const *text_iter = text;
@@ -178,8 +371,11 @@ void draw_text(Bitmap *bitmap, f32x2 text_pos, char const *text, u32 color) {
         u32 unicode_char = utf8_chop_char(&text_iter);
 
         if (unicode_char == '\n') {
+            int line_height = font8x8_glyph_height * 5 / 4;
+
             current_pos.x = text_pos.x;
-            current_pos.y += font8x8_glyph_height;
+            current_pos.y += line_height;
+
             continue;
         }
 
@@ -190,15 +386,37 @@ void draw_text(Bitmap *bitmap, f32x2 text_pos, char const *text, u32 color) {
             assert(glyph_bitmap != NULL);
         }
 
-        AABB glyph_rect = {current_pos, f32x2_add(current_pos, glyph_size)};
-        glyph_rect = aabb_clamp(glyph_rect, bitmap_aabb(bitmap));
+        f32x2 shadow_pos = current_pos;
+        shadow_pos.y += 2;
 
-        for (isize y = glyph_rect.min.y; y < glyph_rect.max.y; y += 1) {
-            for (isize x = glyph_rect.min.x; x < glyph_rect.max.x; x += 1) {
+        f32box2 shadow_box = {shadow_pos, f32x2_add(shadow_pos, glyph_size)};
+        shadow_box = f32box2_clamp(shadow_box, bitmap_box(bitmap));
+
+        for (isize y = shadow_box.min.y; y < shadow_box.max.y; y += 1) {
+            for (isize x = shadow_box.min.x; x < shadow_box.max.x; x += 1) {
+                isize local_x = x - shadow_pos.x;
+                isize local_y = y - shadow_pos.y;
+
+                if ((glyph_bitmap[local_y * font8x8_glyph_width + local_x] & 0xffffffff) != 0) {
+                    bitmap->pixels[y * bitmap->stride + x] = 0x000000;
+                }
+            }
+        }
+
+        f32box2 glyph_box = {current_pos, f32x2_add(current_pos, glyph_size)};
+        glyph_box = f32box2_clamp(glyph_box, bitmap_box(bitmap));
+
+        for (isize y = glyph_box.min.y; y < glyph_box.max.y; y += 1) {
+            for (isize x = glyph_box.min.x; x < glyph_box.max.x; x += 1) {
                 isize local_x = x - current_pos.x;
                 isize local_y = y - current_pos.y;
 
                 if ((glyph_bitmap[local_y * font8x8_glyph_width + local_x] & 0xffffffff) != 0) {
+                    f32 local_y_norm = (f32)(font8x8_glyph_height - local_y) / font8x8_glyph_height;
+
+                    u8 shade = 192 + 64 * local_y_norm;
+                    u32 color = (u32)shade << 16 | (u32)shade << 8 | shade;
+
                     bitmap->pixels[y * bitmap->stride + x] = color;
                 }
             }
@@ -209,15 +427,12 @@ void draw_text(Bitmap *bitmap, f32x2 text_pos, char const *text, u32 color) {
 }
 
 typedef struct {
-    f32x2 pos;
-    f32x2 size;
+    f32box2 box;
     f32x2 velocity;
     bool visible;
 } Rectangle;
 
 void draw_field(Bitmap *bitmap, Rectangle *rectangles, isize rectangle_count) {
-    draw_rectangle(bitmap, bitmap_aabb(bitmap), 0xffffff);
-
     for (isize i = 0; i < rectangle_count; i += 1) {
         Rectangle rectangle = rectangles[i];
 
@@ -225,15 +440,13 @@ void draw_field(Bitmap *bitmap, Rectangle *rectangles, isize rectangle_count) {
             continue;
         }
 
-        AABB aabb = {
-            .min = rectangle.pos,
-            .max = f32x2_add(rectangle.pos, rectangle.size),
-        };
-        aabb.min = f32x2_scale(aabb.min, bitmap->height);
-        aabb.max = f32x2_scale(aabb.max, bitmap->height);
-
-        fill_rectangle(bitmap, aabb, 0xffff00);
+        f32box2 box = rectangle.box;
+        box.min = f32x2_scale(box.min, bitmap->height);
+        box.max = f32x2_scale(box.max, bitmap->height);
+        fill_rectangle(bitmap, box, ACTIVE_COLOR);
     }
+
+    draw_rectangle(bitmap, bitmap_box(bitmap), SECONDARY_COLOR);
 }
 
 typedef struct {
@@ -257,42 +470,37 @@ int main(void) {
     PCG32 rng;
     pcg32_init(&rng, (u64)time(NULL));
 
-    isize rectangle_count = 4;
     Rectangle rectangles[12] = {
         // left boundary
         {
-            .pos = {-FIELD_ASPECT_RATIO, 0.0F},
-            .size = {FIELD_ASPECT_RATIO, 1.0F},
+            .box = {{-FIELD_ASPECT_RATIO, 0.0F}, {0.0F, 1.0F}},
             .velocity = {0},
             .visible = false,
         },
 
         // right boundary
         {
-            .pos = {FIELD_ASPECT_RATIO, 0.0F},
-            .size = {FIELD_ASPECT_RATIO, 1.0F},
+            .box = {{FIELD_ASPECT_RATIO, 0.0F}, {2.0F * FIELD_ASPECT_RATIO, 1.0F}},
             .velocity = {0},
             .visible = false,
         },
 
         // top boundary
         {
-            .pos = {0.0F, -1.0F},
-            .size = {FIELD_ASPECT_RATIO, 1.0F},
+            .box = {{0.0F, -1.0F}, {FIELD_ASPECT_RATIO, 0.0F}},
             .velocity = {0},
             .visible = false,
         },
 
         // bottom boundary
         {
-            .pos = {0.0F, 1.0F},
-            .size = {FIELD_ASPECT_RATIO, 1.0F},
+            .box = {{0.0F, 1.0F}, {FIELD_ASPECT_RATIO, 2.0F}},
             .velocity = {0},
             .visible = false,
         },
     };
 
-    for (isize i = rectangle_count; i < countof(rectangles); i += 1) {
+    for (isize i = 4; i < countof(rectangles); i += 1) {
         f32 size_x = 0.05F + f64_random(&rng) * 0.2F;
         f32 aspect_ratio = 0.75F + f64_random(&rng) * 0.5F;
         f32x2 size = {
@@ -308,8 +516,7 @@ int main(void) {
         f32 angle = f64_random(&rng) * 2.0F * (f32)M_PI;
 
         rectangles[i] = (Rectangle){
-            .pos = pos,
-            .size = size,
+            .box = (f32box2){pos, f32x2_add(pos, size)},
             .velocity = f32x2_scale((f32x2){cosf(angle), sinf(angle)}, 0.5F),
             .visible = true,
         };
@@ -318,9 +525,9 @@ int main(void) {
     while (!gui_window_should_close(window)) {
         GuiBitmap *gui_bitmap = gui_window_bitmap(window);
         if (gui_window_resized(window)) {
-            isize new_width;
-            isize new_height;
+            int new_width, new_height;
             gui_window_size(window, &new_width, &new_height);
+
             gui_bitmap_resize(gui_bitmap, new_width, new_height);
         }
 
@@ -328,13 +535,13 @@ int main(void) {
         gui_bitmap_size(gui_bitmap, &bitmap.width, &bitmap.height);
         bitmap.stride = bitmap.width;
 
-        f32 dt = (f32)gui_window_frame_time(window);
+        f64 dt = gui_window_frame_time(window);
 
-        bitmap_clear(&bitmap, 0x333333);
+        bitmap_clear(&bitmap, BACKGROUND_COLOR);
 
-        char text_buffer[128];
-        snprintf(text_buffer, sizeof(text_buffer), "FPS: %.1f", gui_window_fps(window));
-        draw_text(&bitmap, (f32x2){16, 16}, text_buffer, 0xffffff);
+        int mouse_x, mouse_y;
+        gui_mouse_position(window, &mouse_x, &mouse_y);
+        f32x2 mouse_position = {mouse_x, mouse_y};
 
         f32x2 interior_size = {
             bitmap.width - 1 - 2 * FIELD_MARGIN,
@@ -347,70 +554,101 @@ int main(void) {
             }
             f32 field_width = field_height * FIELD_ASPECT_RATIO;
 
-            AABB field_aabb = {
+            f32box2 field_box = {
                 .min = {(bitmap.width - field_width) / 2.0F, (bitmap.height - field_height) / 2.0F},
                 .max = {(bitmap.width + field_width) / 2.0F, (bitmap.height + field_height) / 2.0F},
             };
 
-            Bitmap field_bitmap = sub_bitmap(&bitmap, field_aabb);
+            Bitmap field_bitmap = sub_bitmap(&bitmap, field_box);
             draw_field(&field_bitmap, rectangles, countof(rectangles));
         }
 
         gui_bitmap_render(gui_bitmap);
 
-        for (isize i = 0; i < countof(rectangles); i += 1) {
-            rectangles[i].pos = f32x2_add(
-                rectangles[i].pos,
-                f32x2_scale(rectangles[i].velocity, dt)
-            );
-        }
+        f64 time_left = dt;
+        while (time_left > 0.0) {
+            Rectangle *this_rectangle = NULL;
+            Rectangle *other_rectangle = NULL;
 
-        for (isize to_update = 0; to_update < countof(rectangles); to_update += 1) {
-            if (
-                rectangles[to_update].velocity.x == 0.0F &&
-                rectangles[to_update].velocity.y == 0.0F
-            ) {
-                continue;
+            f32 collision_time = INFINITY;
+            f32x2 collision_normal;
+
+            for (isize this = 0; this < countof(rectangles); this += 1) {
+                Rectangle rectangle = rectangles[this];
+
+                if (rectangle.velocity.x == 0.0F && rectangle.velocity.y == 0.0F) {
+                    continue;
+                }
+
+                f32x2 ray_origin = f32x2_scale(
+                    f32x2_add(rectangle.box.min, rectangle.box.max),
+                    0.5F
+                );
+
+                for (isize other = 0; other < countof(rectangles); other += 1) {
+                    if (this == other) {
+                        continue;
+                    }
+
+                    f32x2 ray_direction = f32x2_sub(rectangle.velocity, rectangles[other].velocity);
+
+                    f32box2 fat_box;
+                    fat_box.min = f32x2_sub(
+                        rectangles[other].box.min,
+                        f32x2_scale(f32x2_sub(rectangle.box.max, rectangle.box.min), 0.5F)
+                    );
+                    fat_box.max = f32x2_add(
+                        rectangles[other].box.max,
+                        f32x2_scale(f32x2_sub(rectangle.box.max, rectangle.box.min), 0.5F)
+                    );
+
+                    f32 near, far;
+                    f32x2 normal;
+                    if (ray_vs_f32box2(ray_origin, ray_direction, fat_box, &near, &far, &normal)) {
+                        if (near < 0.0F || near > collision_time) {
+                            continue;
+                        }
+
+                        this_rectangle = &rectangles[this];
+                        other_rectangle = &rectangles[other];
+                        collision_time = near;
+                        collision_normal = normal;
+                    }
+                }
             }
 
-            for (isize to_collide = 0; to_collide < countof(rectangles); to_collide += 1) {
-                if (to_update == to_collide) {
-                    continue;
-                }
+            // Update rectangle positions first:
+            f32 time_passed = f32_min(collision_time, time_left);
+            for (isize i = 0; i < countof(rectangles); i += 1) {
+                f32x2 distance = f32x2_scale(rectangles[i].velocity, time_passed);
+                rectangles[i].box.min = f32x2_add(rectangles[i].box.min, distance);
+                rectangles[i].box.max = f32x2_add(rectangles[i].box.max, distance);
+            }
 
-                AABB aabb_to_update = {
-                    rectangles[to_update].pos,
-                    f32x2_add(rectangles[to_update].pos, rectangles[to_update].size),
-                };
-                AABB aabb_to_collide = {
-                    rectangles[to_collide].pos,
-                    f32x2_add(rectangles[to_collide].pos, rectangles[to_collide].size),
-                };
-                if (!aabb_vs_aabb(aabb_to_update, aabb_to_collide)) {
-                    continue;
-                }
-
-                f32 horizontal_overlap =
-                    f32_min(aabb_to_update.max.x, aabb_to_collide.max.x) -
-                    f32_max(aabb_to_update.min.x, aabb_to_collide.min.x);
-                f32 vertical_overlap =
-                    f32_min(aabb_to_update.max.y, aabb_to_collide.max.y) -
-                    f32_max(aabb_to_update.min.y, aabb_to_collide.min.y);
-
-                if (vertical_overlap > horizontal_overlap) {
-                    if (aabb_to_update.min.x < aabb_to_collide.min.x) {
-                        rectangles[to_update].velocity.x = -fabsf(rectangles[to_update].velocity.x);
+            // Then update rectangle velocities:
+            if (collision_time <= time_left) {
+                // The target rectangle bounces off in the direction of the collision normal.
+                // The rectangle it collided with bounces off in the opposite direction.
+                if (collision_normal.x != 0.0F) {
+                    if (collision_normal.x > 0.0F) {
+                        this_rectangle->velocity.x = f32_abs(this_rectangle->velocity.x);
+                        other_rectangle->velocity.x = -f32_abs(other_rectangle->velocity.x);
                     } else {
-                        rectangles[to_update].velocity.x = fabsf(rectangles[to_update].velocity.x);
+                        this_rectangle->velocity.x = -f32_abs(this_rectangle->velocity.x);
+                        other_rectangle->velocity.x = f32_abs(other_rectangle->velocity.x);
                     }
                 } else {
-                    if (aabb_to_update.min.y < aabb_to_collide.min.y) {
-                        rectangles[to_update].velocity.y = -fabsf(rectangles[to_update].velocity.y);
+                    if (collision_normal.y > 0.0F) {
+                        this_rectangle->velocity.y = f32_abs(this_rectangle->velocity.y);
+                        other_rectangle->velocity.y = -f32_abs(other_rectangle->velocity.y);
                     } else {
-                        rectangles[to_update].velocity.y = fabsf(rectangles[to_update].velocity.y);
+                        this_rectangle->velocity.y = -f32_abs(this_rectangle->velocity.y);
+                        other_rectangle->velocity.y = f32_abs(other_rectangle->velocity.y);
                     }
                 }
             }
+
+            time_left = f32_max(time_left - collision_time, 0.0);
         }
     }
 

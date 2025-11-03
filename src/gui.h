@@ -1,62 +1,39 @@
 #ifndef GUI_H
 #define GUI_H
 
-#define GUI_MAX_WINDOW_WIDTH 32767
-#define GUI_MAX_WINDOW_HEIGHT 32767
-
 #include <stdbool.h>
-
-// Redefinition of typedefs is a C11 feature.
-// This is the official™ guard, which is used across different headers to protect u8 and friends.
-// (Or just add a #define before including this header, if you already have short names defined.)
-#ifndef SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
-    #define SHORT_NAMES_FOR_PRIMITIVE_TYPES_WERE_DEFINED
-
-    #include <stdint.h>
-    #include <stddef.h>
-
-    typedef int8_t i8;
-    typedef uint8_t u8;
-    typedef uint16_t u16;
-    typedef int16_t i16;
-    typedef uint32_t u32;
-    typedef int32_t i32;
-    typedef uint64_t u64;
-    typedef int64_t i64;
-
-    typedef uintptr_t uptr;
-    typedef size_t usize;
-    typedef ptrdiff_t isize;
-
-    typedef float f32;
-    typedef double f64;
-#endif
+#include <stdint.h>
 
 typedef struct GuiWindow GuiWindow;
-typedef struct GuiBitmap GuiBitmap;
 
-// Arena is a pair of pointers: struct { u8 *begin; u8 *end; }
-GuiWindow *gui_window_create(
-    isize width, isize height,
-    char const *title,
-    void *arena
-);
+// Arena is a pair of pointers: struct { unsigned char *begin; unsigned char *end; }
+GuiWindow *gui_window_create(int width, int height, char const *title, void *arena);
 void gui_window_destroy(GuiWindow *window);
 
-bool gui_window_resized(GuiWindow const *window);
-void gui_window_size(GuiWindow const *window, isize *width, isize *height);
-
-// Polls events, updates the timer and tells, if you should quit your game/render loop.
+// Polls events, updates timer and FPS counter, tells if you should quit your game / render loop.
 bool gui_window_should_close(GuiWindow *window);
 
-f64 gui_window_time(GuiWindow const *window);
-f64 gui_window_frame_time(GuiWindow const *window);
-f32 gui_window_fps(GuiWindow const *window);
+bool gui_window_resized(GuiWindow const *window);
+void gui_window_size(GuiWindow const *window, int *width, int *height);
+
+void gui_mouse_position(GuiWindow const *window, int *mouse_x, int *mouse_y);
+
+#define GUI_MOUSE_BUTTON_LEFT 0
+#define GUI_MOUSE_BUTTON_RIGHT 1
+bool gui_mouse_button_down(GuiWindow const *window, int mouse_button);
+bool gui_mouse_button_was_pressed(GuiWindow const *window, int mouse_button);
+bool gui_mouse_button_was_released(GuiWindow const *window, int mouse_button);
+
+double gui_window_time(GuiWindow const *window);
+double gui_window_frame_time(GuiWindow const *window);
+double gui_window_fps(GuiWindow const *window);
+
+typedef struct GuiBitmap GuiBitmap;
 
 GuiBitmap *gui_window_bitmap(GuiWindow *window);
-u32 *gui_bitmap_data(GuiBitmap const *bitmap);
-bool gui_bitmap_resize(GuiBitmap *bitmap, isize width, isize height);
-void gui_bitmap_size(GuiBitmap const *bitmap, isize *width, isize *height);
+uint32_t *gui_bitmap_data(GuiBitmap const *bitmap);
+bool gui_bitmap_resize(GuiBitmap *bitmap, int width, int height);
+void gui_bitmap_size(GuiBitmap const *bitmap, int *width, int *height);
 void gui_bitmap_render(GuiBitmap *bitmap);
 
-#endif // GUI_H
+#endif
