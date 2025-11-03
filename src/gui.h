@@ -27,6 +27,7 @@ bool gui_mouse_button_was_released(GuiWindow const *window, int mouse_button);
 double gui_window_time(GuiWindow const *window);
 double gui_window_frame_time(GuiWindow const *window);
 double gui_window_fps(GuiWindow const *window);
+void gui_window_set_target_fps(GuiWindow *window, double target_fps);
 
 typedef struct GuiBitmap GuiBitmap;
 

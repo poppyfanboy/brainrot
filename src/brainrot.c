@@ -466,6 +466,7 @@ int main(void) {
     if (window == NULL) {
         return 1;
     }
+    gui_window_set_target_fps(window, 60.0);
 
     PCG32 rng;
     pcg32_init(&rng, (u64)time(NULL));
@@ -565,12 +566,15 @@ int main(void) {
 
         gui_bitmap_render(gui_bitmap);
 
+        f32 const TIME_EPSILON = 1e-6;
+        isize iterations_without_progress[countof(rectangles)] = {0};
+
         f64 time_left = dt;
         while (time_left > 0.0) {
+            f32 closest_collision_time = INFINITY;
+
             Rectangle *this_rectangle = NULL;
             Rectangle *other_rectangle = NULL;
-
-            f32 collision_time = INFINITY;
             f32x2 collision_normal;
 
             for (isize this = 0; this < countof(rectangles); this += 1) {
@@ -584,6 +588,10 @@ int main(void) {
                     f32x2_add(rectangle.box.min, rectangle.box.max),
                     0.5F
                 );
+
+                f32 this_collision_time = INFINITY;
+                Rectangle *this_collision_rectangle;
+                f32x2 this_collision_normal;
 
                 for (isize other = 0; other < countof(rectangles); other += 1) {
                     if (this == other) {
@@ -605,28 +613,53 @@ int main(void) {
                     f32 near, far;
                     f32x2 normal;
                     if (ray_vs_f32box2(ray_origin, ray_direction, fat_box, &near, &far, &normal)) {
-                        if (near < 0.0F || near > collision_time) {
+                        if (near < 0.0F) {
                             continue;
                         }
 
+                        if (near < this_collision_time) {
+                            this_collision_time = near;
+                            this_collision_rectangle = &rectangles[other];
+                            this_collision_normal = normal;
+                        }
+                    }
+                }
+
+                // If the rectangle has "bounced" 4 times without moving, this probably means that
+                // its velocity vector has come back to the original direction which we've already
+                // tried.
+                if (iterations_without_progress[this] < 4 || this_collision_time >= TIME_EPSILON) {
+                    if (this_collision_time < TIME_EPSILON) {
+                        iterations_without_progress[this] += 1;
+                    } else {
+                        iterations_without_progress[this] = 0;
+                    }
+
+                    if (this_collision_time < closest_collision_time) {
+                        closest_collision_time = this_collision_time;
+
                         this_rectangle = &rectangles[this];
-                        other_rectangle = &rectangles[other];
-                        collision_time = near;
-                        collision_normal = normal;
+                        other_rectangle = this_collision_rectangle;
+                        collision_normal = this_collision_normal;
                     }
                 }
             }
 
             // Update rectangle positions first:
-            f32 time_passed = f32_min(collision_time, time_left);
+            f32 time_passed = f32_min(closest_collision_time, time_left);
             for (isize i = 0; i < countof(rectangles); i += 1) {
+                // Don't update rectangles which got stuck.
+                if (iterations_without_progress[i] > 0) {
+                    continue;
+                }
+
                 f32x2 distance = f32x2_scale(rectangles[i].velocity, time_passed);
                 rectangles[i].box.min = f32x2_add(rectangles[i].box.min, distance);
                 rectangles[i].box.max = f32x2_add(rectangles[i].box.max, distance);
             }
 
             // Then update rectangle velocities:
-            if (collision_time <= time_left) {
+            if (closest_collision_time <= time_left) {
                 // The target rectangle bounces off in the direction of the collision normal.
                 // The rectangle it collided with bounces off in the opposite direction.
                 if (collision_normal.x != 0.0F) {
@@ -648,7 +681,7 @@ int main(void) {
                 }
             }
 
-            time_left = f32_max(time_left - collision_time, 0.0);
+            time_left -= time_passed;
         }
     }
 

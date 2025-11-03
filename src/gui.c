@@ -521,6 +521,7 @@ void gui_window_destroy(GuiWindow *window) {
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <timeapi.h>
 
 // I took these from here:
 // https://github.com/f1nalspace/final_game_tech/blob/master/final_platform_layer.h
@@ -595,6 +596,7 @@ struct GuiWindow {
         f64 last_frame_time;
     } timer;
 
+    f64 target_fps;
     FPSCounter fps_counter;
 };
 
@@ -859,6 +861,7 @@ GuiWindow *gui_window_create(int width, int height, char const *title, void *are
     window->timer.last_frame_time = 0.0;
 
     fps_counter_init(&window->fps_counter);
+    window->target_fps = 0.0;
 
     return window;
 
@@ -917,6 +920,20 @@ bool gui_window_should_close(GuiWindow *window) {
     LARGE_INTEGER current_time;
     QueryPerformanceCounter(&current_time);
     LONGLONG elapsed_ticks = current_time.QuadPart - window->timer.last_update_time.QuadPart;
+
+    if (window->target_fps != 0.0) {
+        f64 millis_per_tick = 1e3 / (f64)window->timer.frequency.QuadPart;
+        f64 elapsed_millis = (f64)elapsed_ticks * millis_per_tick;
+        f64 target_millis = 1e3 / window->target_fps;
+
+        DWORD sleep_millis = (DWORD)(target_millis - elapsed_millis);
+        if (sleep_millis > 0) {
+            Sleep(sleep_millis);
+            QueryPerformanceCounter(&current_time);
+            elapsed_ticks = current_time.QuadPart - window->timer.last_update_time.QuadPart;
+        }
+    }
+
     window->timer.last_update_time = current_time;
 
     f64 micros_per_tick = 1e6 / (f64)window->timer.frequency.QuadPart;
@@ -951,6 +968,13 @@ double gui_window_frame_time(GuiWindow const *window) {
 
 double gui_window_fps(GuiWindow const *window) {
     return fps_counter_average(&window->fps_counter);
+}
+
+void gui_window_set_target_fps(GuiWindow *window, double target_fps) {
+    // Set Windows scheduler granularity to 1ms.
+    if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+        window->target_fps = target_fps;
+    }
 }
 
 GuiBitmap *gui_window_bitmap(GuiWindow *window) {
