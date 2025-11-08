@@ -8,9 +8,10 @@ typedef struct GuiWindow GuiWindow;
 
 // Arena is a pair of pointers: struct { unsigned char *begin; unsigned char *end; }
 GuiWindow *gui_window_create(int width, int height, char const *title, void *arena);
+void gui_window_set_target_fps(GuiWindow *window, double target_fps);
 void gui_window_destroy(GuiWindow *window);
 
-// Polls events, updates timer and FPS counter, tells if you should quit your game / render loop.
+// Polls events, updates timer and FPS counter, sleeps to match the target FPS.
 bool gui_window_should_close(GuiWindow *window);
 
 bool gui_window_resized(GuiWindow const *window);
@@ -27,7 +28,6 @@ bool gui_mouse_button_was_released(GuiWindow const *window, int mouse_button);
 double gui_window_time(GuiWindow const *window);
 double gui_window_frame_time(GuiWindow const *window);
 double gui_window_fps(GuiWindow const *window);
-void gui_window_set_target_fps(GuiWindow *window, double target_fps);
 
 typedef struct GuiBitmap GuiBitmap;
 

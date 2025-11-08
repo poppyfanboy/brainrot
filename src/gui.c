@@ -926,8 +926,8 @@ bool gui_window_should_close(GuiWindow *window) {
         f64 elapsed_millis = (f64)elapsed_ticks * millis_per_tick;
         f64 target_millis = 1e3 / window->target_fps;
 
-        DWORD sleep_millis = (DWORD)(target_millis - elapsed_millis);
-        if (sleep_millis > 0) {
+        if (elapsed_millis < target_millis) {
+            DWORD sleep_millis = (DWORD)(target_millis - elapsed_millis);
             Sleep(sleep_millis);
             QueryPerformanceCounter(&current_time);
             elapsed_ticks = current_time.QuadPart - window->timer.last_update_time.QuadPart;

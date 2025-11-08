@@ -1,11 +1,8 @@
-// TODO: Make it so that randomly generated rectangles never overlap initially on the first frame.
-
 #include <assert.h> // assert
 #include <stdlib.h> // malloc
 #include <stddef.h> // NULL
 #include <time.h>   // time
-#include <math.h>   // fabsf, sinf, cosf, M_PI, floorf
-#include <stdio.h>  // snprintf
+#include <math.h>   // sinf, cosf, M_PI, floorf
 
 #include "gui.h"
 
@@ -471,56 +468,86 @@ int main(void) {
     PCG32 rng;
     pcg32_init(&rng, (u64)time(NULL));
 
-    Rectangle rectangles[12] = {
+    isize rectangle_count = 0;
+    Rectangle rectangles[12];
+
+    assert(countof(rectangles) >= 4);
+    rectangles[rectangle_count++] = (Rectangle){
         // left boundary
-        {
-            .box = {{-FIELD_ASPECT_RATIO, 0.0F}, {0.0F, 1.0F}},
-            .velocity = {0},
-            .visible = false,
-        },
-
+        .box = {{-FIELD_ASPECT_RATIO, 0.0F}, {0.0F, 1.0F}},
+        .velocity = {0},
+        .visible = true,
+    };
+    rectangles[rectangle_count++] = (Rectangle){
         // right boundary
-        {
-            .box = {{FIELD_ASPECT_RATIO, 0.0F}, {2.0F * FIELD_ASPECT_RATIO, 1.0F}},
-            .velocity = {0},
-            .visible = false,
-        },
-
+        .box = {{FIELD_ASPECT_RATIO, 0.0F}, {2.0F * FIELD_ASPECT_RATIO, 1.0F}},
+        .velocity = {0},
+        .visible = true,
+    };
+    rectangles[rectangle_count++] = (Rectangle){
         // top boundary
-        {
-            .box = {{0.0F, -1.0F}, {FIELD_ASPECT_RATIO, 0.0F}},
-            .velocity = {0},
-            .visible = false,
-        },
-
+        .box = {{0.0F, -1.0F}, {FIELD_ASPECT_RATIO, 0.0F}},
+        .velocity = {0},
+        .visible = true,
+    };
+    rectangles[rectangle_count++] = (Rectangle){
         // bottom boundary
-        {
-            .box = {{0.0F, 1.0F}, {FIELD_ASPECT_RATIO, 2.0F}},
-            .velocity = {0},
-            .visible = false,
-        },
+        .box = {{0.0F, 1.0F}, {FIELD_ASPECT_RATIO, 2.0F}},
+        .velocity = {0},
+        .visible = true,
     };
 
-    for (isize i = 4; i < countof(rectangles); i += 1) {
-        f32 size_x = 0.05F + f64_random(&rng) * 0.2F;
-        f32 aspect_ratio = 0.75F + f64_random(&rng) * 0.5F;
-        f32x2 size = {
-            size_x,
-            size_x * aspect_ratio,
-        };
+    isize give_up_counter = 0;
+    while (rectangle_count < countof(rectangles)) {
+        retry_rectangle_generation:
+        give_up_counter += 1;
+        if (give_up_counter > countof(rectangles) * 4) {
+            break;
+        }
 
-        f32x2 pos = {
-            f64_random(&rng) * (FIELD_ASPECT_RATIO - size.x),
-            f64_random(&rng) * (1.0F - size.y),
-        };
+        // Try to find a top-left corner position which is not yet occupied by any rectangle:
+        f32x2 min_position = {f64_random(&rng) * (FIELD_ASPECT_RATIO), f64_random(&rng)};
+        for (isize i = 0; i < rectangle_count; i += 1) {
+            if (f32box2_contains(rectangles[i].box, min_position)) {
+                goto retry_rectangle_generation;
+            }
+        }
+
+        // Find out what's the largest rectangle we can fit in the chosen position:
+        f32x2 max_position = {FIELD_ASPECT_RATIO, 1.0F};
+        for (isize i = 0; i < rectangle_count; i += 1) {
+            if (min_position.x < rectangles[i].box.min.x) {
+                max_position.x = f32_min(max_position.x, rectangles[i].box.min.x);
+            }
+            if (min_position.y < rectangles[i].box.min.y) {
+                max_position.y = f32_min(max_position.y, rectangles[i].box.min.y);
+            }
+        }
+
+        f32 const MIN_SIZE = 0.05F;
+        if (
+            max_position.x - min_position.x < MIN_SIZE ||
+            max_position.y - min_position.y < MIN_SIZE
+        ) {
+            goto retry_rectangle_generation;
+        }
+
+        f32 const MIN_ASPECT_RATIO = 0.75F;
+        f32 const MAX_ASPECT_RATIO = 1.25F;
+        f32 aspect_ratio =
+            MIN_ASPECT_RATIO + f64_random(&rng) * (MAX_ASPECT_RATIO - MIN_ASPECT_RATIO);
+
+        f32 size_x = MIN_SIZE + f64_random(&rng) * (max_position.x - min_position.x);
+        f32x2 size = { size_x, size_x * aspect_ratio };
+        f32box2 box = {min_position, f32x2_add(min_position, size)};
+        if (box.max.x > max_position.x || box.max.y > max_position.y) {
+            goto retry_rectangle_generation;
+        }
 
         f32 angle = f64_random(&rng) * 2.0F * (f32)M_PI;
+        f32x2 velocity = f32x2_scale((f32x2){cosf(angle), sinf(angle)}, 0.5F);
 
-        rectangles[i] = (Rectangle){
-            .box = (f32box2){pos, f32x2_add(pos, size)},
-            .velocity = f32x2_scale((f32x2){cosf(angle), sinf(angle)}, 0.5F),
-            .visible = true,
-        };
+        rectangles[rectangle_count++] = (Rectangle){box, velocity, .visible = true};
     }
 
     while (!gui_window_should_close(window)) {
@@ -561,7 +588,7 @@ int main(void) {
             };
 
             Bitmap field_bitmap = sub_bitmap(&bitmap, field_box);
-            draw_field(&field_bitmap, rectangles, countof(rectangles));
+            draw_field(&field_bitmap, rectangles, rectangle_count);
         }
 
         gui_bitmap_render(gui_bitmap);
@@ -577,7 +604,7 @@ int main(void) {
             Rectangle *other_rectangle = NULL;
             f32x2 collision_normal;
 
-            for (isize this = 0; this < countof(rectangles); this += 1) {
+            for (isize this = 0; this < rectangle_count; this += 1) {
                 Rectangle rectangle = rectangles[this];
 
                 if (rectangle.velocity.x == 0.0F && rectangle.velocity.y == 0.0F) {
@@ -593,7 +620,7 @@ int main(void) {
                 Rectangle *this_collision_rectangle;
                 f32x2 this_collision_normal;
 
-                for (isize other = 0; other < countof(rectangles); other += 1) {
+                for (isize other = 0; other < rectangle_count; other += 1) {
                     if (this == other) {
                         continue;
                     }
@@ -647,7 +674,7 @@ int main(void) {
 
             // Update rectangle positions first:
             f32 time_passed = f32_min(closest_collision_time, time_left);
-            for (isize i = 0; i < countof(rectangles); i += 1) {
+            for (isize i = 0; i < rectangle_count; i += 1) {
                 // Don't update rectangles which got stuck.
                 if (iterations_without_progress[i] > 0) {
                     continue;
