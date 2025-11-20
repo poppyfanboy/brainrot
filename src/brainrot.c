@@ -2,7 +2,7 @@
 #include <stdlib.h> // malloc
 #include <stddef.h> // NULL
 #include <time.h>   // time
-#include <math.h>   // sinf, cosf, M_PI, floorf, roundf, sqrtf, fabsf
+#include <math.h>   // sinf, cosf, M_PI, roundf, sqrtf, fabsf
 
 #include "gui.h"
 
@@ -122,12 +122,6 @@ static inline f32x2 f32x2_clamp(f32x2 value, f32x2 min, f32x2 max) {
     return value;
 }
 
-static inline f32x2 f32x2_floor(f32x2 vector) {
-    vector.x = floorf(vector.x);
-    vector.y = floorf(vector.y);
-    return vector;
-}
-
 static inline f32x2 f32x2_round(f32x2 vector) {
     vector.x = roundf(vector.x);
     vector.y = roundf(vector.y);
@@ -237,11 +231,10 @@ typedef struct {
     int stride;
 } Bitmap;
 
-// This box is only meant for clamping pixels when drawing to the bitmap.
 static inline f32box2 bitmap_box(Bitmap const *bitmap) {
     f32box2 box = {
         .min = {0, 0},
-        .max = {bitmap->width - 1, bitmap->height - 1},
+        .max = {bitmap->width, bitmap->height},
     };
     return box;
 }
@@ -270,63 +263,68 @@ void bitmap_clear(Bitmap *bitmap, u32 color) {
 }
 
 void fill_rectangle(Bitmap *bitmap, f32box2 rectangle, u32 color) {
-    rectangle = f32box2_clamp(rectangle, bitmap_box(bitmap));
+    // Check if rectangle is completely clamped out:
+    if (!f32box2_vs_f32box2(rectangle, bitmap_box(bitmap))) {
+        return;
+    }
 
-    for (isize y = rectangle.min.y; y <= rectangle.max.y; y += 1) {
+    isize from_y = f32_max(0, rectangle.min.y);
+    isize to_y = f32_min(bitmap->height - 1, rectangle.max.y);
+    for (isize y = from_y; y <= to_y; y += 1) {
         u32 *line = &bitmap->pixels[y * bitmap->stride];
-        for (isize x = rectangle.min.x; x <= rectangle.max.x; x += 1) {
+
+        isize from_x = f32_max(0, rectangle.min.x);
+        isize to_x = f32_min(bitmap->width - 1, rectangle.max.x);
+        for (isize x = from_x; x <= to_x; x += 1) {
             line[x] = color;
         }
     }
 }
 
 void draw_rectangle(Bitmap *bitmap, f32box2 rectangle, u32 color) {
-    f32box2 bounds = bitmap_box(bitmap);
-    f32box2 clamped_rectangle = f32box2_clamp(rectangle, bounds);
-
-    // Check if rectangle is completely clamped out
-    if (clamped_rectangle.max.y - clamped_rectangle.min.y < 1) {
-        return;
-    }
-    if (clamped_rectangle.max.x - clamped_rectangle.min.x < 1) {
+    // Check if rectangle is completely clamped out:
+    if (!f32box2_vs_f32box2(rectangle, bitmap_box(bitmap))) {
         return;
     }
 
     // Top horizontal line
-    if (bounds.min.y <= rectangle.min.y) {
-        for (isize x = clamped_rectangle.min.x; x <= (isize)clamped_rectangle.max.x; x += 1) {
+    if (rectangle.min.y >= 0) {
+        isize from = f32_max(0, rectangle.min.x);
+        isize to = f32_min(bitmap->width - 1, rectangle.max.x);
+        for (isize x = from; x <= to; x += 1) {
             bitmap->pixels[(isize)rectangle.min.y * bitmap->stride + x] = color;
         }
     }
 
     // Bottom horizontal line
-    if (rectangle.max.y <= bounds.max.y) {
-        for (isize x = clamped_rectangle.min.x; x <= (isize)clamped_rectangle.max.x; x += 1) {
+    if (rectangle.max.y < bitmap->height) {
+        isize from = f32_max(0, rectangle.min.x);
+        isize to = f32_min(bitmap->width - 1, rectangle.max.x);
+        for (isize x = from; x <= to; x += 1) {
             bitmap->pixels[(isize)rectangle.max.y * bitmap->stride + x] = color;
         }
     }
 
     // Left vertical line
-    if (bounds.min.x <= rectangle.min.x) {
-        for (isize y = clamped_rectangle.min.y; y <= (isize)clamped_rectangle.max.y; y += 1) {
+    if (rectangle.min.x >= 0) {
+        isize from = f32_max(0, rectangle.min.y);
+        isize to = f32_min(bitmap->height - 1, rectangle.max.y);
+        for (isize y = from; y <= to; y += 1) {
             bitmap->pixels[y * bitmap->stride + (isize)rectangle.min.x] = color;
         }
     }
 
     // Right vertical line
-    if (rectangle.max.x <= bounds.max.x) {
-        for (isize y = clamped_rectangle.min.y; y <= (isize)clamped_rectangle.max.y; y += 1) {
+    if (rectangle.max.x < bitmap->width) {
+        isize from = f32_max(0, rectangle.min.y);
+        isize to = f32_min(bitmap->height - 1, rectangle.max.y);
+        for (isize y = from; y <= to; y += 1) {
             bitmap->pixels[y * bitmap->stride + (isize)rectangle.max.x] = color;
         }
     }
 }
 
 void draw_line(Bitmap *bitmap, f32x2 from, f32x2 to, u32 color) {
-    from = f32x2_floor(from);
-    to = f32x2_floor(to);
-
-    f32box2 bounds = bitmap_box(bitmap);
-
     // Line equation: f(x, y) = Ax + By + C
     // (A, B) is a perpendicular vector. C is then derived from f(x, y) = 0.
     f32 A = to.y - from.y;
@@ -335,10 +333,12 @@ void draw_line(Bitmap *bitmap, f32x2 from, f32x2 to, u32 color) {
 
     // Single pixel special case:
     if (A == 0 && B == 0) {
-        f32 x = from.x, y = from.y;
-        if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
-            bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+        isize x = from.x, y = from.y;
+
+        if ((0 <= x && x < bitmap->width) && (0 <= y && y < bitmap->height)) {
+            bitmap->pixels[y * bitmap->stride + x] = color;
         }
+
         return;
     }
 
@@ -355,19 +355,23 @@ void draw_line(Bitmap *bitmap, f32x2 from, f32x2 to, u32 color) {
     }
 
     if (to.x - from.x > to.y - from.y) {
-        for (isize x = from.x; x <= to.x; x += 1) {
-            f32 y = (-A * x - C) / B;
+        isize from_x = f32_max(0, from.x);
+        isize to_x = f32_min(bitmap->width - 1, to.x);
+        for (isize x = from_x; x <= to_x; x += 1) {
+            isize y = (-A * (x + 0.5F) - C) / B + 0.5F;
 
-            if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
-                bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+            if (y >= 0 && y < bitmap->height) {
+                bitmap->pixels[y * bitmap->stride + x] = color;
             }
         }
     } else {
-        for (isize y = from.y; y <= to.y; y += 1) {
-            f32 x = (-B * y - C) / A;
+        isize from_y = f32_max(0, from.y);
+        isize to_y = f32_min(bitmap->height - 1, to.y);
+        for (isize y = from_y; y <= to_y; y += 1) {
+            isize x = (-B * (y + 0.5F) - C) / A + 0.5F;
 
-            if (f32box2_contains(bounds, (f32x2){x + 0.5F, y + 0.5F})) {
-                bitmap->pixels[(isize)(y + 0.5F) * bitmap->stride + (isize)(x + 0.5F)] = color;
+            if (x >= 0 && x < bitmap->width) {
+                bitmap->pixels[y * bitmap->stride + x] = color;
             }
         }
     }
@@ -514,7 +518,11 @@ void draw_field(Bitmap *bitmap, Rectangle const *rectangles, isize rectangle_cou
         }
     }
 
-    draw_rectangle(bitmap, bitmap_box(bitmap), SECONDARY_COLOR);
+    draw_rectangle(
+        bitmap,
+        (f32box2){{0, 0}, {bitmap->width - 1, bitmap->height - 1}},
+        SECONDARY_COLOR
+    );
 }
 
 typedef struct {
