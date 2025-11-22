@@ -533,7 +533,7 @@ typedef struct {
 #ifdef _WIN32
 int WinMain(void) {
 #else
-int main(void)
+int main(void) {
 #endif
     isize arena_capacity = 64 * 1024;
     u8 *arena_memory = malloc(arena_capacity);

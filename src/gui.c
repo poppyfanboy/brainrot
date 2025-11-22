@@ -213,16 +213,26 @@ struct GuiWindow {
     GuiBitmap bitmap;
     bool should_close;
 
+    int mouse_x;
+    int mouse_y;
+
+    struct {
+        bool was_down;
+        bool is_down;
+        bool currently_down;
+    } mouse_buttons[2];
+
     struct {
         struct timespec created_time;
         struct timespec last_update_time;
         f64 last_frame_time;
     } timer;
 
+    f64 target_fps;
     FPSCounter fps_counter;
 };
 
-GuiWindow *gui_window_create(int width, int height, char const *title, GuiArena *arena) {
+GuiWindow *gui_window_create(int width, int height, char const *title, void *arena) {
     assert(width < GUI_MAX_WINDOW_WIDTH && height < GUI_MAX_WINDOW_HEIGHT);
 
     GuiWindow *window = arena_alloc(arena, sizeof(GuiWindow));
@@ -279,7 +289,9 @@ GuiWindow *gui_window_create(int width, int height, char const *title, GuiArena 
             .background_pixel = BlackPixel(window->display, DefaultScreen(window->display)),
             .colormap = colormap,
             .bit_gravity = StaticGravity,
-            .event_mask = StructureNotifyMask,
+            .event_mask =
+                StructureNotifyMask |
+                ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
         };
         Window handle = XCreateWindow(
             window->display,
@@ -347,7 +359,12 @@ fail:
 }
 
 static void gui_window_handle_event(GuiWindow *window, XEvent *event) {
-    if (event->type == ConfigureNotify) {
+    if (event->type == window->event.shm_completion) {
+        window->bitmap.available = true;
+    }
+
+    switch (event->type) {
+    case ConfigureNotify: {
         if (
             window->width != event->xconfigure.width ||
             window->height != event->xconfigure.height
@@ -356,17 +373,66 @@ static void gui_window_handle_event(GuiWindow *window, XEvent *event) {
             window->height = event->xconfigure.height;
             window->resized = true;
         }
-    } else if (event->type == ClientMessage) {
+    } break;
+
+    case ClientMessage: {
         if ((Atom)event->xclient.data.l[0] == window->atom.delete_window) {
             window->should_close = true;
         }
-    } else if (event->type == window->event.shm_completion) {
-        window->bitmap.available = true;
+    } break;
+
+    case MotionNotify: {
+        window->mouse_x = event->xmotion.x;
+        window->mouse_y = event->xmotion.y;
+    } break;
+
+    case ButtonPress: {
+        if (event->xbutton.button == Button1) {
+            window->mouse_buttons[GUI_MOUSE_BUTTON_LEFT].currently_down = true;
+        } else if (event->xbutton.button == Button3) {
+            window->mouse_buttons[GUI_MOUSE_BUTTON_RIGHT].currently_down = true;
+        }
+    } break;
+
+    case ButtonRelease: {
+        if (event->xbutton.button == Button1) {
+            window->mouse_buttons[GUI_MOUSE_BUTTON_LEFT].currently_down = false;
+        } else if (event->xbutton.button == Button3) {
+            window->mouse_buttons[GUI_MOUSE_BUTTON_RIGHT].currently_down = false;
+        }
+    } break;
     }
 }
 
 bool gui_window_resized(GuiWindow const *window) {
     return window->resized;
+}
+
+void gui_mouse_position(GuiWindow const *window, int *mouse_x, int *mouse_y) {
+    *mouse_x = window->mouse_x;
+    *mouse_y = window->mouse_y;
+}
+
+bool gui_mouse_button_down(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return window->mouse_buttons[mouse_button].is_down == 1;
+}
+
+bool gui_mouse_button_was_pressed(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return
+        window->mouse_buttons[mouse_button].was_down == 0 &&
+        window->mouse_buttons[mouse_button].is_down == 1;
+}
+
+bool gui_mouse_button_was_released(GuiWindow const *window, int mouse_button) {
+    assert(0 <= mouse_button && mouse_button < countof(window->mouse_buttons));
+
+    return
+        window->mouse_buttons[mouse_button].was_down == 1 &&
+        window->mouse_buttons[mouse_button].is_down == 0;
 }
 
 void gui_window_size(GuiWindow const *window, int *width, int *height) {
@@ -377,16 +443,41 @@ void gui_window_size(GuiWindow const *window, int *width, int *height) {
 bool gui_window_should_close(GuiWindow *window) {
     struct timespec current_time;
     clock_gettime(CLOCK_MONOTONIC, &current_time);
+
+    if (window->target_fps != 0.0) {
+        i64 elapsed_seconds = current_time.tv_sec - window->timer.last_update_time.tv_sec;
+        i64 elapsed_nanos = current_time.tv_nsec - window->timer.last_update_time.tv_nsec;
+
+        f64 elapsed_nanos_total = elapsed_seconds * 1e9 + elapsed_nanos;
+        f64 target_nanos_total = 1e9 / window->target_fps;
+
+        if (elapsed_nanos_total < target_nanos_total) {
+            struct timespec sleep_time;
+            sleep_time.tv_sec =
+                (target_nanos_total - elapsed_nanos_total) * 1e-9;
+            sleep_time.tv_nsec =
+                (target_nanos_total - elapsed_nanos_total) - sleep_time.tv_sec * 1e9;
+
+            nanosleep(&sleep_time, NULL);
+
+            clock_gettime(CLOCK_MONOTONIC, &current_time);
+        }
+    }
+
     i64 elapsed_seconds = current_time.tv_sec - window->timer.last_update_time.tv_sec;
     i64 elapsed_nanos = current_time.tv_nsec - window->timer.last_update_time.tv_nsec;
     window->timer.last_update_time = current_time;
 
     window->timer.last_frame_time = (f64)elapsed_seconds + (f64)elapsed_nanos / 1e9;
 
-    i64 frame_time_nanos = elapsed_seconds * 1000000000 + elapsed_nanos;
-    fps_counter_add_frame(&window->fps_counter, frame_time_nanos);
+    i64 elapsed_nanos_total = elapsed_seconds * 1000000000 + elapsed_nanos;
+    fps_counter_add_frame(&window->fps_counter, elapsed_nanos_total);
 
     window->resized = false;
+    for (isize i = 0; i < countof(window->mouse_buttons); i += 1) {
+        window->mouse_buttons[i].was_down = window->mouse_buttons[i].is_down;
+        window->mouse_buttons[i].is_down = window->mouse_buttons[i].currently_down;
+    }
 
     while (!window->should_close && XPending(window->display) > 0) {
         XEvent event;
@@ -503,6 +594,10 @@ double gui_window_frame_time(GuiWindow const *window) {
 
 double gui_window_fps(GuiWindow const *window) {
     return fps_counter_average(&window->fps_counter);
+}
+
+void gui_window_set_target_fps(GuiWindow *window, double target_fps) {
+    window->target_fps = target_fps;
 }
 
 void gui_window_destroy(GuiWindow *window) {
