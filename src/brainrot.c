@@ -2,7 +2,7 @@
 #include <stdlib.h> // malloc
 #include <stddef.h> // NULL
 #include <time.h>   // time
-#include <math.h>   // sinf, cosf, M_PI, roundf, sqrtf, fabsf
+#include <math.h>   // sinf, cosf, M_PI, roundf, sqrtf, fabsf, floorf
 
 #include "gui.h"
 
@@ -73,6 +73,16 @@ void pcg32_init(PCG32 *rng, u64 init_state) {
 
 static inline f64 f64_random(PCG32 *rng) {
     return (f64)pcg32_random(rng) * 0x1p-32;
+}
+
+static inline isize isize_clamp(isize value, isize min, isize max) {
+    if (value < min) {
+        return min;
+    }
+    if (value > max) {
+        return max;
+    }
+    return value;
 }
 
 static inline f32 f32_max(f32 left, f32 right) {
@@ -262,6 +272,17 @@ void bitmap_clear(Bitmap *bitmap, u32 color) {
     }
 }
 
+static inline void bitmap_set_pixel(Bitmap *bitmap, isize x, isize y, u32 color) {
+    if (x < 0 || x >= bitmap->width) {
+        return;
+    }
+    if (y < 0 || y >= bitmap->height) {
+        return;
+    }
+
+    bitmap->pixels[y * bitmap->stride + x] = color;
+}
+
 void fill_rectangle(Bitmap *bitmap, f32box2 rectangle, u32 color) {
     // Check if rectangle is completely clamped out:
     if (!f32box2_vs_f32box2(rectangle, bitmap_box(bitmap))) {
@@ -373,6 +394,109 @@ void draw_line(Bitmap *bitmap, f32x2 from, f32x2 to, u32 color) {
             if (x >= 0 && x < bitmap->width) {
                 bitmap->pixels[y * bitmap->stride + x] = color;
             }
+        }
+    }
+}
+
+void draw_circle(Bitmap *bitmap, f32x2 center, f32 radius, u32 color) {
+    struct { isize x, y; } center_floored = {center.x, center.y};
+    isize x = 0;
+    isize y = radius;
+
+    // Using a slightly larger circle seems to produce nicer looking results.
+    // https://www.redblobgames.com/grids/circle-drawing/#aesthetics
+    f32 const radius_squared = (floorf(radius) + 0.5F) * (floorf(radius) + 0.5F);
+
+    while (x <= y) {
+        // Top half
+
+        bitmap_set_pixel(bitmap, center_floored.x + x, center_floored.y - y, color);
+        bitmap_set_pixel(bitmap, center_floored.x - x, center_floored.y - y, color);
+
+        bitmap_set_pixel(bitmap, center_floored.x + y, center_floored.y - x, color);
+        bitmap_set_pixel(bitmap, center_floored.x - y, center_floored.y - x, color);
+
+        // Bottom half
+
+        bitmap_set_pixel(bitmap, center_floored.x + y, center_floored.y + x, color);
+        bitmap_set_pixel(bitmap, center_floored.x - y, center_floored.y + x, color);
+
+        bitmap_set_pixel(bitmap, center_floored.x + x, center_floored.y + y, color);
+        bitmap_set_pixel(bitmap, center_floored.x - x, center_floored.y + y, color);
+
+        x += 1;
+
+        // Do the calculations as if we're drawing a slightly larger circle.
+        f32 go_straight_distance = f32_abs(x * x + (y + 0.5F) * (y + 0.5F) - radius_squared);
+        f32 turn_distance = f32_abs(x * x + (y - 0.5F) * (y - 0.5F) - radius_squared);
+        if (turn_distance < go_straight_distance) {
+            y -= 1;
+        }
+    }
+}
+
+void fill_circle(Bitmap *bitmap, f32x2 center, f32 radius, u32 color) {
+    struct { isize x, y; } center_floored = {center.x, center.y};
+    isize x = 0;
+    isize y = radius;
+
+    f32 const radius_squared = (floorf(radius) + 0.5F) * (floorf(radius) + 0.5F);
+
+    while (x <= y) {
+        // Top half
+
+        if (
+            center_floored.y - y >= 0 && center_floored.y - y < bitmap->height &&
+            center_floored.x + x >= 0 && center_floored.x - x < bitmap->width
+        ) {
+            isize line_from = isize_clamp(center_floored.x - x, 0, bitmap->width - 1);
+            isize line_to = isize_clamp(center_floored.x + x, 0, bitmap->width - 1);
+            for (isize line = line_from; line <= line_to; line += 1) {
+                bitmap->pixels[(center_floored.y - y) * bitmap->stride + line] = color;
+            }
+        }
+
+        if (
+            center_floored.y - x >= 0 && center_floored.y - x < bitmap->height &&
+            center_floored.x + y >= 0 && center_floored.x - y < bitmap->width
+        ) {
+            isize line_from = isize_clamp(center_floored.x - y, 0, bitmap->width - 1);
+            isize line_to = isize_clamp(center_floored.x + y, 0, bitmap->width - 1);
+            for (isize line = line_from; line <= line_to; line += 1) {
+                bitmap->pixels[(center_floored.y - x) * bitmap->stride + line] = color;
+            }
+        }
+
+        // Bottom half
+
+        if (
+            center_floored.y + x >= 0 && center_floored.y + x < bitmap->height &&
+            center_floored.x + y >= 0 && center_floored.x - y < bitmap->width
+        ) {
+            isize line_from = isize_clamp(center_floored.x - y, 0, bitmap->width - 1);
+            isize line_to = isize_clamp(center_floored.x + y, 0, bitmap->width - 1);
+            for (isize line = line_from; line <= line_to; line += 1) {
+                bitmap->pixels[(center_floored.y + x) * bitmap->stride + line] = color;
+            }
+        }
+
+        if (
+            center_floored.y + y >= 0 && center_floored.y + y < bitmap->height &&
+            center_floored.x + x >= 0 && center_floored.x - x < bitmap->width
+        ) {
+            isize line_from = isize_clamp(center_floored.x - x, 0, bitmap->width - 1);
+            isize line_to = isize_clamp(center_floored.x + x, 0, bitmap->width - 1);
+            for (isize line = line_from; line <= line_to; line += 1) {
+                bitmap->pixels[(center_floored.y + y) * bitmap->stride + line] = color;
+            }
+        }
+
+        x += 1;
+
+        f32 go_straight_distance = f32_abs(x * x + (y + 0.5F) * (y + 0.5F) - radius_squared);
+        f32 turn_distance = f32_abs(x * x + (y - 0.5F) * (y - 0.5F) - radius_squared);
+        if (turn_distance < go_straight_distance) {
+            y -= 1;
         }
     }
 }
