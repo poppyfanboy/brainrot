@@ -35,7 +35,7 @@ typedef struct {
 
 #define ARENA_ALIGNMENT 16
 
-void *arena_alloc(Arena *arena, isize size) {
+static void *arena_alloc(Arena *arena, isize size) {
     assert(size > 0);
 
     isize padding = (~(uptr)arena->begin + 1) & (ARENA_ALIGNMENT - 1);
@@ -705,6 +705,17 @@ static LRESULT CALLBACK window_procedure(
 
     if (window != NULL) {
         switch (message_type) {
+        // > An application returns zero if it processes this message.
+        case WM_PAINT: {
+            return 0;
+        } break;
+
+        // > An application should return nonzero if it erases the background; otherwise, it should
+        // > return zero.
+        case WM_ERASEBKGND: {
+            return 1;
+        } break;
+
         case WM_DESTROY: {
             i32_atomic_store(&window->should_close, true);
         } break;
